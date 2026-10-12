@@ -298,6 +298,58 @@ else
     echo "  [跳过]   未找到 $DIST（服务器上通常只部署产物，可忽略）"
 fi
 
+# 十五、代码清理（2026-10-12 批次）
+echo ""
+echo "── 十五、代码清理（死代码 / 垃圾 / 可移植性）──"
+rmf "$B/app/Middlewares/CorsMiddleware.php"
+rmf "$B/config/app.php"
+for d in "$B/database" "$B/datebase"; do
+    if [ -d "$d" ]; then
+        echo "  [残留]   $d 应已删除（空目录，datebase 还是拼写错误）"; fail=$((fail+1))
+    else
+        echo "  [已删除] $d"; pass=$((pass+1))
+    fi
+done
+
+# 可移植性：源码里不应再出现「非注释的 /www/wwwroot」绝对路径
+ABS=$(grep -rn "/www/wwwroot" "$B/app" "$B/includes" --include="*.php" 2>/dev/null \
+      | grep -vE ":[0-9]+:[[:space:]]*//" | grep -vE ":[0-9]+:[[:space:]]*#")
+if [ -n "$ABS" ]; then
+    echo "  [警告]   源码仍有硬编码绝对路径（非注释），换服务器路径即失效："
+    printf '%s\n' "$ABS" | head -5 | sed 's/^/           /'; fail=$((fail+1))
+else
+    echo "  [OK]     源码无硬编码绝对路径（/www/wwwroot 仅存于注释）"; pass=$((pass+1))
+fi
+chk "$B/app/legacy_trace.php" "SCRIPT_FILENAME"
+
+# 十六、单元测试（零依赖，直接跑源码）
+echo ""
+echo "── 十六、单元测试 ──"
+PHP_BIN="${PHP_BIN:-/www/server/php/82/bin/php}"
+if [ -f "$B/tests/run.php" ] && [ -x "$PHP_BIN" ]; then
+    TOUT=$("$PHP_BIN" "$B/tests/run.php" 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "  [OK]     后端单元测试全通过（$(printf '%s' "$TOUT" | grep -o '通过 [0-9]* 项' | head -1)）"; pass=$((pass+1))
+    else
+        echo "  [失败]   后端单元测试未通过："
+        printf '%s\n' "$TOUT" | tail -12 | sed 's/^/           /'; fail=$((fail+1))
+    fi
+else
+    echo "  [跳过]   tests/run.php 缺失或 PHP 不可用（PHP_BIN=$PHP_BIN）"
+fi
+
+if [ -f "$F/tests/richText.test.mjs" ] && command -v node >/dev/null 2>&1; then
+    NOUT=$(node "$F/tests/richText.test.mjs" 2>&1)
+    if [ $? -eq 0 ]; then
+        echo "  [OK]     前端工具测试全通过（$(printf '%s' "$NOUT" | grep -o '通过 [0-9]* 项' | head -1)）"; pass=$((pass+1))
+    else
+        echo "  [失败]   前端测试未通过："
+        printf '%s\n' "$NOUT" | tail -12 | sed 's/^/           /'; fail=$((fail+1))
+    fi
+else
+    echo "  [跳过]   node 不在 PATH 或 frontend/tests 缺失（前端测试可忽略）"
+fi
+
 echo ""
 echo "=================================================="
 echo " 通过 $pass 项 / 失败 $fail 项"
