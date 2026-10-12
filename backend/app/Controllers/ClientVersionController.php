@@ -35,7 +35,8 @@ class ClientVersionController
         'trace_client'        => '质量追溯客户端（Qt6 / Win10+）',
         'trace_client_win7'   => '质量追溯客户端（Win7 兼容版 / 32位）',
         'barcode_validator'   => '条码校验客户端',
-        'trace_scanner'       => '追溯扫描客户端',
+        'trace_scanner'       => '追溯扫描客户端（Android）',
+        'workshop_app'        => '装置车间 App（Android）',
         'label_print'         => '标签打印客户端',
     ];
 
