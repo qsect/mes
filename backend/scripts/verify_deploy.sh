@@ -1,0 +1,315 @@
+#!/bin/bash
+# ─────────────────────────────────────────────────────────────
+# 部署校验：确认「系统安全加固」批次文件已正确就位（按内容特征，而非文件日期）
+#
+# 用法（服务器上）：
+#   bash /www/wwwroot/vite/backend/scripts/verify_deploy.sh
+#   或指定项目根：
+#   bash verify_deploy.sh /www/wwwroot/vite
+# ─────────────────────────────────────────────────────────────
+
+BASE="${1:-/www/wwwroot/vite}"
+B="$BASE/backend"
+F="$BASE/frontend"
+pass=0
+fail=0
+warn=0
+
+chk() {  # chk <文件> [应含特征]
+    if [ ! -f "$1" ]; then echo "  [缺失]   $1"; fail=$((fail+1)); return; fi
+    if [ -n "$2" ] && ! grep -q "$2" "$1" 2>/dev/null; then
+        echo "  [未更新] $1   (缺特征: $2)"; fail=$((fail+1)); return
+    fi
+    echo "  [OK]     $1"; pass=$((pass+1))
+}
+
+neg() {  # neg <文件> <不应再有的特征>
+    if [ -f "$1" ] && grep -q "$2" "$1" 2>/dev/null; then
+        echo "  [警告]   $1   仍含旧特征: $2"; fail=$((fail+1)); return
+    fi
+    echo "  [OK]     $1"; pass=$((pass+1))
+}
+
+rmf() {  # rmf <应已删除的文件>
+    if [ -e "$1" ]; then echo "  [残留]   $1"; fail=$((fail+1)); else echo "  [已删除] $1"; pass=$((pass+1)); fi
+}
+
+neg_r() {  # neg_r <目录> <不应再共现的特征A> <特征B>
+    if grep -rn "$2" "$1" 2>/dev/null | grep -q "$3"; then
+        echo "  [警告]   $1 仍存在 \"$2 ... $3\" 回显残留"; fail=$((fail+1)); return
+    fi
+    echo "  [OK]     $1 无 \"$2 ... $3\" 残留"; pass=$((pass+1))
+}
+
+echo "=================================================="
+echo " 项目根: $BASE"
+echo "=================================================="
+
+echo ""
+echo "── 一、新增文件（6）──"
+chk "$B/app/Core/CemConfig.php"                        "class CemConfig"
+chk "$B/config/cem.local.php"                          "CEM_HOST"
+chk "$B/app/Core/PasswordPolicy.php"                   "needsRehash"
+chk "$B/app/Core/Schema.php"                           "ensureLoginAttempts"
+chk "$F/src/utils/sanitizeHtml.js"                     "DOMParser"
+chk "$BASE/.gitignore"                                 "node_modules"
+
+echo ""
+echo "── 二、后端核心修改（9）──"
+chk "$B/public/index.php"                              "excelSafe"
+chk "$B/public/index.php"                              "users/delete"
+chk "$B/public/index.php"                              "request_id"
+chk "$B/public/index.php"                              "CORS_ORIGINS"
+chk "$B/public/index.php"                              "samesite"
+chk "$B/app/Controllers/DispatchKittingController.php" "__construct"
+chk "$B/app/Controllers/DiscussController.php"         "sanitizeHtml"
+chk "$B/app/Controllers/SystemController.php"          "deleteUser"
+chk "$B/app/Controllers/AuthController.php"            "session_regenerate_id"
+chk "$B/app/Controllers/AuthController.php"            "needsRehash"
+chk "$B/includes/CemClient.php"                        "function cemUser"
+chk "$B/app/cem/index.php"                             "CemConfig"
+chk "$B/app/legacy_trace.php"                          "CemConfig::host()"
+
+echo ""
+echo "── 三、导出控制器 excelSafe（15）──"
+for x in Assets Attendance BarcodeValidator Beibian Diary DocError FirstPiece Impedance Mac MacQuery Oee Osm Quality Troubleshoot Weekly; do
+    chk "$B/app/Controllers/${x}Controller.php" "excelSafe"
+done
+
+echo ""
+echo "── 四、前端（源码，5）──"
+chk "$F/src/utils/sanitizeHtml.js"                     "DOMParser"
+chk "$F/src/main.js"                                   "v-safe-html"
+chk "$F/src/views/Dashboard.vue"                       "v-safe-html"
+chk "$F/src/views/discuz/Index.vue"                    "v-safe-html"
+chk "$F/src/views/quality_trace/Index.vue"             "v-safe-html"
+
+echo ""
+echo "── 五、M5 异常回显脱敏 ──"
+chk "$B/app/Core/Response.php"                          "function exception"
+chk "$B/app/Controllers/AssetsController.php"           "Response::exception"
+chk "$B/app/Controllers/DispatchKittingController.php"  "Response::exception"
+chk "$B/app/Controllers/SystemController.php"           "Response::exception"
+neg_r "$B/app/Controllers" "Response::error" "getMessage"
+neg_r "$B/app/Controllers" "sendJson(false" "getMessage"
+
+echo ""
+echo "── 六、旧特征应已消失 ──"
+neg "$B/includes/CemClient.php"                        "const CEM_USER"
+
+echo ""
+echo "── 七、残留文件应已删除（4）──"
+rmf "$B/test.php"
+rmf "$B/diagnose_admin.php"
+rmf "$B/app/Services/AuthService.php"
+rmf "$B/includes/CemClient-副本.php"
+
+echo ""
+echo "── 八、技术债 L5/L6/L7 ──"
+chk "$B/app/Core/RateLimiter.php"                      "function guard"
+chk "$B/app/Core/Schema.php"                           "function ensureOnce"
+chk "$B/public/index.php"                              "RateLimiter::guard"
+chk "$B/app/Controllers/ImpedanceController.php"       "Schema::ensureOnce"
+chk "$B/app/Controllers/SystemController.php"          "isReady('perm_user')"
+chk "$F/src/stores/auth.js"                            "isLoggedIn"
+neg "$F/src/api/request.js"                            "X-Session-Id"
+neg "$F/src/stores/auth.js"                            "setItem('token'"
+
+echo ""
+echo "── 九、PHP 语法检查（php -l，拦截残缺/损坏文件）──"
+PHP_BIN="${PHP_BIN:-/www/server/php/82/bin/php}"
+if [ -x "$PHP_BIN" ]; then
+    synerr=0
+    while IFS= read -r f; do
+        if ! "$PHP_BIN" -l "$f" >/dev/null 2>&1; then
+            echo "  [语法错误] $f"
+            "$PHP_BIN" -l "$f" 2>&1 | head -1 | sed 's/^/             /'
+            synerr=$((synerr+1)); fail=$((fail+1))
+        fi
+    done < <(find "$B/app" "$B/public" "$B/includes" -name "*.php" 2>/dev/null)
+    if [ "$synerr" -eq 0 ]; then
+        echo "  [OK]     全部 PHP 文件语法正确"; pass=$((pass+1))
+    else
+        echo "  → 共 $synerr 个文件存在语法错误（如 legacy_trace.php 残缺导致 trace 全模块 500）"
+    fi
+else
+    echo "  [跳过]   未找到 php CLI（$PHP_BIN），可用 PHP_BIN=/path/to/php 指定后重跑"
+fi
+
+echo ""
+echo "── 十、legacy_trace.php 完整性（防止再次被残缺副本覆盖）──"
+LT="$B/app/legacy_trace.php"
+if [ -f "$LT" ]; then
+    ltlines=$(wc -l < "$LT" | tr -d ' ')
+    if [ "$ltlines" -lt 1000 ]; then
+        echo "  [残缺]   legacy_trace.php 仅 $ltlines 行（完整版应为 ~1245 行），追溯写入接口会 ParseError→500"
+        fail=$((fail+1))
+    else
+        echo "  [OK]     行数 $ltlines"; pass=$((pass+1))
+    fi
+    ltmiss=0
+    for a in check_or_fetch_erp save_config start_trace scan_barcode update_scan_record delete_scan_record manual_push_cem export_excel; do
+        if ! grep -q "action === '$a'" "$LT"; then
+            echo "  [缺失]   分支 $a"; ltmiss=$((ltmiss+1)); fail=$((fail+1))
+        fi
+    done
+    if [ "$ltmiss" -eq 0 ]; then
+        echo "  [OK]     8 个 action 分支齐全"; pass=$((pass+1))
+    fi
+    for fn in trBoxPointScanned trCountCompletedBoxes trIsBoxFullyCompleted trRefreshBoxStatus jsonBody; do
+        grep -q "$fn" "$LT" || { echo "  [警告]   缺少辅助定义 $fn"; fail=$((fail+1)); }
+    done
+else
+    echo "  [缺失]   $LT"; fail=$((fail+1))
+fi
+
+echo ""
+echo "── 十一、凭据安全（源码内不得残留真实口令）──"
+# 口令值现场取自 .env 与 config/cem.local.php（不读 .env.example）——
+# 本脚本自身不持有任何口令字面量，口令轮换后无需改脚本。
+SECRET_VALS=$( {
+    [ -f "$B/.env" ] && grep -hE '^[A-Za-z_]*(PASS|PASSWORD|SECRET)=' "$B/.env" 2>/dev/null | cut -d= -f2-
+    [ -f "$B/config/cem.local.php" ] && grep -oE "'[A-Za-z_]*PASS[A-Za-z_]*'[[:space:]]*=>[[:space:]]*'[^']*'" "$B/config/cem.local.php" 2>/dev/null | sed "s/.*=>[[:space:]]*'//; s/'[[:space:]]*$//"
+} 2>/dev/null | sed 's/^[[:space:]]*//; s/[[:space:]]*$//; s/^"//; s/"$//' | sed '/^$/d' )
+PAT=""
+while IFS= read -r v; do
+    [ ${#v} -lt 6 ] && continue                                  # 太短的值不参与回扫
+    case "$v" in your_*|change_this*|placeholder*|example*|xxx*|'<'*) continue ;; esac   # 占位符跳过
+    esc=$(printf '%s' "$v" | sed 's/[.^$*+?()\[\]{}\\|]/\\&/g')
+    PAT="${PAT:+$PAT|}$esc"
+done <<< "$SECRET_VALS"
+
+if [ -z "$PAT" ]; then
+    echo "  [跳过]   未从 .env / cem.local.php 读到口令，跳过源码回扫"; warn=$((warn+1))
+else
+    CRED_HITS=$(grep -rEn "$PAT" "$B/app" "$B/public" "$B/includes" "$B/cron" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$CRED_HITS" -eq 0 ]; then
+        echo "  [OK]     源码内无真实口令（已回扫 app/public/includes/cron）"; pass=$((pass+1))
+    else
+        echo "  [残留]   发现 $CRED_HITS 处真实口令（源码或备份泄露即凭据泄露）："
+        # 只列文件，不回显匹配行，避免把口令又打印到终端
+        grep -rEln "$PAT" "$B/app" "$B/public" "$B/includes" "$B/cron" 2>/dev/null | sed 's/^/           /'
+        fail=$((fail+1))
+    fi
+    # 示例文件绝不允许出现真实口令（常被误提交到版本库/随源码发放）
+    if [ -f "$B/.env.example" ]; then
+        EX_N=$(grep -Ec "$PAT" "$B/.env.example" 2>/dev/null | tr -d ' ')
+        case "$EX_N" in ''|*[!0-9]*) EX_N=0 ;; esac
+        if [ "$EX_N" -gt 0 ]; then
+            echo "  [残留]   .env.example 含真实口令 $EX_N 处，必须改为占位符（行号：$(grep -En "$PAT" "$B/.env.example" 2>/dev/null | cut -d: -f1 | tr '\n' ' '))"
+            fail=$((fail+1))
+        else
+            echo "  [OK]     .env.example 仅含占位符"; pass=$((pass+1))
+        fi
+    fi
+fi
+
+# 备份残留：*.bak、*.bak.<时间戳>、*.orig、*~、*副本* 等
+# （注意：*.bak 匹配不到 legacy_trace.php.bak.20261010142843 这类带时间戳的名字，故用 *.bak.*）
+BAK_LIST=$(find "$BASE" \( -name node_modules -o -name vendor -o -name .git -o -name dist \) -prune -o \
+    -type f \( -name "*.bak" -o -name "*.bak.*" -o -name "*.orig" -o -name "*.orig.*" \
+                -o -name "*.save" -o -name "*.save.*" -o -name "*.old" -o -name "*.copy*" \
+                -o -name "*~" -o -name "*.swp" -o -name "*副本*" -o -name "*备份*" \) -print 2>/dev/null)
+BAK_HITS=$(printf '%s\n' "$BAK_LIST" | grep -c '[^[:space:]]')
+if [ "$BAK_HITS" -eq 0 ]; then
+    echo "  [OK]     项目内无 .bak/.orig/副本 备份残留"; pass=$((pass+1))
+else
+    BAK_CRED=0
+    if [ -n "$PAT" ]; then
+        while IFS= read -r bf; do
+            if [ -n "$bf" ] && grep -Eq "$PAT" "$bf" 2>/dev/null; then BAK_CRED=$((BAK_CRED+1)); fi
+        done <<< "$BAK_LIST"
+    fi
+    if [ "$BAK_CRED" -gt 0 ]; then
+        echo "  [残留]   发现 $BAK_HITS 个备份文件，其中 $BAK_CRED 个含真实口令，必须删除："
+        fail=$((fail+1))
+    else
+        echo "  [警告]   发现 $BAK_HITS 个备份文件（虽未检出真实口令，但会随目录同步一起部署，建议移出项目）："
+        warn=$((warn+1))
+    fi
+    printf '%s\n' "$BAK_LIST" | sed 's/^/           /'
+fi
+for nf in app/Core/Env.php app/Core/ExternalDb.php; do
+    if [ -f "$B/$nf" ]; then
+        echo "  [OK]     $nf"; pass=$((pass+1))
+    else
+        echo "  [缺失]   $nf"; fail=$((fail+1))
+    fi
+done
+if [ -f "$B/.env" ]; then
+    for k in DB_PASS SQLSRV_PASS MES_DB_PASS; do
+        if grep -q "^$k=.\+" "$B/.env"; then
+            echo "  [OK]     .env 已配置 $k"; pass=$((pass+1))
+        else
+            echo "  [缺失]   .env 未配置 $k（源码已无兜底口令，缺失将导致对应数据源不可用）"; fail=$((fail+1))
+        fi
+    done
+else
+    echo "  [警告]   未找到 $B/.env"; fail=$((fail+1))
+fi
+
+echo ""
+echo "── 十二、模块维护权限标记（前端按钮级隐藏）──"
+for pair in "EquipmentController:equipment" "WeeklyController:weekly" "AttendanceController:attendance" "FirstPieceController:first_piece"; do
+    ctl="${pair%%:*}"; mod="${pair##*:}"
+    f="$B/app/Controllers/$ctl.php"
+    if [ -f "$f" ] && grep -q "can_manage" "$f" && grep -q "ModulePerm::canEdit" "$f"; then
+        echo "  [OK]     $ctl 已返回 can_manage（模块 $mod）"; pass=$((pass+1))
+    else
+        echo "  [未更新] $ctl 缺少 can_manage / ModulePerm 判定"; fail=$((fail+1))
+    fi
+done
+
+echo ""
+echo "── 十三、审计日志覆盖（写操作留痕）──"
+AUDIT_MISS=0
+for ctl in TraceController ImpedanceController QualityController MacController AssetsController BarcodeValidatorController DiaryController DiscussController ManhourController OeeController SkillController LabelPrintController BeibianController DispatchKittingController; do
+    f="$B/app/Controllers/$ctl.php"
+    if [ -f "$f" ] && grep -q "AuditService::log" "$f"; then
+        :
+    else
+        echo "  [未接入] $ctl 无 AuditService::log"; AUDIT_MISS=$((AUDIT_MISS+1)); fail=$((fail+1))
+    fi
+done
+if [ "$AUDIT_MISS" -eq 0 ]; then
+    echo "  [OK]     重点模块写操作均已接入审计日志"; pass=$((pass+1))
+fi
+grep -q "AuditService::log" "$B/app/legacy_trace.php" 2>/dev/null \
+    && { echo "  [OK]     legacy_trace.php 已接入审计日志"; pass=$((pass+1)); } \
+    || { echo "  [未接入] legacy_trace.php 无 AuditService::log"; fail=$((fail+1)); }
+
+# 十四、前端产物
+echo ""
+echo "── 十四、前端构建产物（按钮级隐藏已生效）──"
+DIST="$BASE/frontend/dist"
+if [ -d "$DIST" ]; then
+    if grep -rq "can_manage" "$DIST/assets" 2>/dev/null; then
+        echo "  [OK]     dist 产物含 can_manage 权限标记"; pass=$((pass+1))
+    else
+        echo "  [未重建] dist 产物未见 can_manage，请 rm -rf dist/assets && npm run build"; fail=$((fail+1))
+    fi
+    MAIN=$(grep -o 'assets/index-[A-Za-z0-9_-]*\.js' "$DIST/index.html" 2>/dev/null | head -1)
+    if [ -n "$MAIN" ] && grep -q 'localStorage.getItem("token")' "$DIST/$MAIN" 2>/dev/null; then
+        echo "  [警告]   主包仍含 localStorage token 逻辑（L7 未生效）"; fail=$((fail+1))
+    else
+        echo "  [OK]     主包无 localStorage token 逻辑"; pass=$((pass+1))
+    fi
+else
+    echo "  [跳过]   未找到 $DIST（服务器上通常只部署产物，可忽略）"
+fi
+
+echo ""
+echo "=================================================="
+echo " 通过 $pass 项 / 失败 $fail 项"
+if [ "$warn" -gt 0 ]; then
+    echo " 提示 $warn 项（不阻断，但建议顺手处理）"
+fi
+if [ "$fail" -eq 0 ]; then
+    echo " ✔ 全部就绪"
+else
+    echo " ✘ 有 $fail 项待处理，见上面 [缺失]/[未更新]/[残留]/[警告]"
+fi
+echo "=================================================="
+echo ""
+echo "提醒：若上方后端项全通过但接口仍异常，请重启 PHP：systemctl restart php-fpm-82"
+echo "      前端只看源码通过不够，还需重建：cd $F && rm -rf dist/assets && npm run build"

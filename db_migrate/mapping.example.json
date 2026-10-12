@@ -1,0 +1,93 @@
+{
+  "_readme": "复制本文件为 mapping.json 后按 20_结构对比.php 的报告逐表填写。JSON 不支持注释，故用 _ 开头的键作说明。",
+  "_字段说明": {
+    "source/target": "源表 → 目标表。注意：本工具【不会建表】，target 必须已存在于新库。",
+    "mode": "insert_ignore=遇重复键跳过(推荐,幂等) | upsert=重复键则更新 | replace=重复则整行替换 | insert=普通插入(重复会报错)",
+    "where": "源表过滤条件，只搬部分数据时用，如 \"status=1\"",
+    "source_charset": "该表单独指定老库编码，覆盖全局 source_charset（GBK 表用）",
+    "batch_size": "每批行数，默认 200",
+    "columns": "逐列映射，见下方 _列说明",
+    "after.reset_auto_increment": "搬完后把目标表自增重置为 MAX(id)+1，避免与后续新建记录撞 ID"
+  },
+  "_列说明": {
+    "from": "源列名；留空表示不取源数据，用 const 给常量",
+    "to": "目标列名（必须存在于新表）",
+    "const": "常量值，支持占位符 {{NOW}} {{DATE}} {{YEAR}} {{UUID}} {{NULL}}",
+    "transform": "trim | int | float | string | upper | lower | strip_tags | bool01 | null_if_zero | null_if_empty | ts_to_datetime | ts_to_date | ms_to_datetime | date_normalize | zero_date_to_null",
+    "map": "值域映射表，如 {\"1\":\"active\",\"0\":\"disabled\"}",
+    "map_default": "map 未命中时使用的值；不写则保留原值",
+    "default": "取到 NULL 时用的默认值",
+    "empty_to_null": "空串转 NULL",
+    "required": "标记必填，取到 NULL 时告警"
+  },
+  "source_charset": "utf8mb4",
+  "tables": [
+    {
+      "note": "示例1：遗留基础表 —— 新系统直接读它，必须原样整表搬。ID 必须保留，否则 role_modules/权限全部错位。",
+      "source": "users",
+      "target": "users",
+      "mode": "insert_ignore",
+      "columns": [
+        { "from": "id", "to": "id" },
+        { "from": "username", "to": "username", "transform": "trim" },
+        { "from": "password", "to": "password" },
+        { "from": "real_name", "to": "real_name", "empty_to_null": true },
+        { "from": "role_id", "to": "role_id" },
+        { "from": "is_admin", "to": "is_admin", "transform": "int" },
+        { "from": "team", "to": "team", "empty_to_null": true }
+      ],
+      "after": { "reset_auto_increment": true }
+    },
+    {
+      "note": "示例2：表名不同 + 列名不同 + 值域不同 + 时间戳转换 + 常量补列。",
+      "source": "old_equipment_list",
+      "target": "equipment",
+      "mode": "insert_ignore",
+      "where": "is_deleted = 0",
+      "columns": [
+        { "from": "equip_id", "to": "id" },
+        { "from": "equip_name", "to": "name", "transform": "trim", "required": true },
+        { "from": "equip_code", "to": "code", "transform": "trim", "empty_to_null": true },
+        { "from": "used_flag", "to": "status",
+          "map": { "1": "active", "0": "disabled" }, "map_default": "disabled" },
+        { "from": "add_time", "to": "created_at", "transform": "ts_to_datetime" },
+        { "from": "remark", "to": "remark", "empty_to_null": true },
+        { "from": "", "to": "source_system", "const": "legacy_import" },
+        { "from": "", "to": "imported_at", "const": "{{NOW}}" }
+      ],
+      "after": { "reset_auto_increment": true }
+    },
+    {
+      "note": "示例3：老库是 GBK 编码，单独指定编码转换，避免中文乱码。",
+      "source": "tab_job",
+      "target": "tab_job",
+      "mode": "insert_ignore",
+      "source_charset": "gbk",
+      "columns": [
+        { "from": "job_id", "to": "job_id" },
+        { "from": "job_name", "to": "job_name", "transform": "trim" },
+        { "from": "plan_qty", "to": "plan_qty", "transform": "int" }
+      ]
+    },
+    {
+      "note": "示例4：宽表带 0 值日期（老库常用 0000-00-00 表示空），转成 NULL。",
+      "source": "old_attendance",
+      "target": "att_employees",
+      "mode": "insert_ignore",
+      "columns": [
+        { "from": "emp_no", "to": "id" },
+        { "from": "emp_name", "to": "name", "transform": "trim" },
+        { "from": "card_no", "to": "card_no", "empty_to_null": true },
+        { "from": "hire_date", "to": "hire_date", "transform": "zero_date_to_null" },
+        { "from": "is_active", "to": "is_active", "transform": "bool01" }
+      ]
+    },
+    {
+      "note": "示例5：暂时不搬的表，用 enabled=false 跳过，先跑通其它表。",
+      "source": "old_big_log_table",
+      "target": "audit_logs",
+      "enabled": false,
+      "columns": []
+    }
+  ]
+}

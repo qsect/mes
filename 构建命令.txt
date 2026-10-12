@@ -1,0 +1,2 @@
+cd /www/wwwroot/vite/frontend && rm -rf dist/assets && npm run build
+

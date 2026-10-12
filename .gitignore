@@ -1,0 +1,52 @@
+# ===== 依赖 =====
+node_modules/
+frontend/node_modules/
+vendor/
+backend/vendor/
+
+# ===== 前端构建产物 =====
+frontend/dist/
+
+# ===== 环境与凭据（★ 绝对不要提交）=====
+.env
+backend/.env
+backend/.env.*
+!backend/.env.example
+backend/config/cem.local.php
+
+# ===== 数据库移植工具（含老库凭据，绝不提交）=====
+db_migrate/source.env
+db_migrate/target.env
+db_migrate/mapping.json
+db_migrate/结构差异报告.md
+old_snapshot_*/
+
+# ===== 运行期数据 / 上传 / 导出 =====
+backend/uploads/
+backend/public/uploads/
+backend/exports/
+backend/storage/
+backend/logs/
+backend/app/cem/logs/
+backend/app/cem/cem_plan_map.json
+*.log
+
+# ===== 已隔离的废弃脚本 =====
+backend/scripts/_deprecated/
+
+# ===== 编辑器 / 操作系统 =====
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# ===== 临时文件 =====
+*.tmp
+*.bak
+*.swp
+
+# ===== AI 工具目录（工作记忆，非项目源码）=====
+.workbuddy/
+
+# ===== 服务器环境文件（宝塔生成，含服务器绝对路径）=====
+.user.ini
