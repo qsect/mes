@@ -32,6 +32,7 @@ class ClientVersionController
      */
     private const KNOWN_CLIENTS = [
         'impedance_recorder' => '阻抗测试客户端',
+        'trace_client'       => '质量追溯客户端',
         'barcode_validator'  => '条码校验客户端',
         'trace_scanner'      => '追溯扫描客户端',
         'label_print'        => '标签打印客户端',
