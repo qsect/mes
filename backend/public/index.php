@@ -596,6 +596,8 @@ $router->add("POST", "/api/client/check_version",  [\App\Controllers\ClientVersi
 // 免登录下载更新包：客户端「登录前」用系统浏览器打开此地址，不能要求会话。
 // 不挂任何中间件；控制器内部只认 client_versions 中已发布记录登记的地址，不接受任意 path。
 $router->add("GET",  "/api/client/download",       [\App\Controllers\ClientVersionController::class, "download"]);
+// HEAD 探测：浏览器/下载工具常先发 HEAD 确认大小与类型，缺失会被判定为文件不存在
+$router->add("HEAD", "/api/client/download",       [\App\Controllers\ClientVersionController::class, "download"]);
 // 管理接口（控制器内部自行校验管理员身份）
 $router->add("GET",  "/api/client/list_clients",   [\App\Controllers\ClientVersionController::class, "listClients"]);
 $router->add("GET",  "/api/client/list_shared",    [\App\Controllers\ClientVersionController::class, "listShared"]);

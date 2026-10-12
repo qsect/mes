@@ -341,6 +341,11 @@ class ClientVersionController
      */
     public function download(): void
     {
+        // 浏览器 / 下载管理器常先发 HEAD 探测文件大小与类型，
+        // HEAD 必须同样返回 200 + 正确的 Content-Type / Content-Length，
+        // 否则探测方会认为文件不存在而放弃下载（只发响应头，不发正文）。
+        $isHead = (($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'HEAD');
+
         try {
             $id  = (int)($_GET['id'] ?? 0);
             $key = trim((string)($_GET['key'] ?? ''));
@@ -392,7 +397,7 @@ class ClientVersionController
                 http_response_code(404);
                 exit('安装包不存在或路径非法');
             }
-            $this->streamFile($full);
+            $this->streamFile($full, $isHead);
         } catch (Throwable $e) {
             http_response_code(500);
             error_log('[client/download] ' . $e->getMessage());
@@ -400,8 +405,12 @@ class ClientVersionController
         }
     }
 
-    /** 二进制流式输出（分块，避免大包占满内存） */
-    private function streamFile(string $full): void
+    /**
+     * 二进制流式输出（分块，避免大包占满内存）
+     *
+     * @param bool $headOnly true = 只发响应头不发正文（HEAD 探测）
+     */
+    private function streamFile(string $full, bool $headOnly = false): void
     {
         $ext = strtolower(pathinfo($full, PATHINFO_EXTENSION));
         // 与 FilesController 一致的黑名单：不允许下发可执行脚本
@@ -431,6 +440,10 @@ class ClientVersionController
         header('Content-Length: ' . (string)$size);
         header('Cache-Control: public, max-age=300');
         header('X-Content-Type-Options: nosniff');
+
+        if ($headOnly) {
+            exit;
+        }
 
         $fp = fopen($full, 'rb');
         if ($fp === false) {
