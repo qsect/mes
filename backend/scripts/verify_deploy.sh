@@ -351,6 +351,33 @@ else
 fi
 
 echo ""
+echo "── 十七、客户端免登录下载（更新包）──"
+# 客户端在「登录前」用系统浏览器打开 download_url，必须走免鉴权端点，
+# 落到 /api/files/download 或 /backend/ 静态路径都会表现为「提示需要登录」。
+if grep -q '"/api/client/download"' "$B/public/index.php"; then
+    echo "  [OK]     /api/client/download 已注册为公开路由"; pass=$((pass+1))
+else
+    echo "  [缺失]   /api/client/download 未注册 → 客户端登录前下载会提示需要登录"; fail=$((fail+1))
+fi
+if grep -q "public function download" "$B/app/Controllers/ClientVersionController.php"; then
+    echo "  [OK]     ClientVersionController::download() 已就位"; pass=$((pass+1))
+else
+    echo "  [缺失]   ClientVersionController::download() 不存在"; fail=$((fail+1))
+fi
+if grep -q "/api/client/download" "$B/public/index.php" && grep -q '"/api/client/check_version",' "$B/public/index.php"; then
+    echo "  [OK]     强制改密白名单已覆盖公开下载端点"; pass=$((pass+1))
+    if ! grep -A4 '"/api/client/check_version",' "$B/public/index.php" | grep -q '"/api/client/download"'; then
+        echo "  [警告]   /api/client/download 未加入强制改密白名单"; warn=$((warn+1))
+    fi
+fi
+if [ -d "$B/public/shared_files" ]; then
+    CNT=$(find "$B/public/shared_files" -type f 2>/dev/null | wc -l | tr -d ' ')
+    echo "  [OK]     shared_files 存在（共 $CNT 个文件，相对路径下载地址的根）"; pass=$((pass+1))
+else
+    echo "  [警告]   shared_files 目录不存在，填写相对路径将无法下载"; warn=$((warn+1))
+fi
+
+echo ""
 echo "=================================================="
 echo " 通过 $pass 项 / 失败 $fail 项"
 if [ "$warn" -gt 0 ]; then

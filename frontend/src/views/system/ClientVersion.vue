@@ -8,10 +8,14 @@
       style="margin-bottom: 16px;"
     >
       <template #default>
-        阻抗测试客户端启动时会请求 <code>/api/client/check_version</code>。
+        客户端启动时会请求 <code>/api/client/check_version</code>。
         这里发布的<b>最高版本</b>会被当作最新版本；勾选「强制更新」后，
         版本较低的客户端必须更新才能进入系统。<br />
-        建议每次发布新版本后，在「下载地址」填入新版安装包的下载链接。
+        <b>下载地址</b>可以填两种：
+        ① <code>http(s)://</code> 外链；
+        ② 共享目录下的相对路径，如 <code>电脑工具/TraceClient_v2.2.exe</code>。<br />
+        填相对路径时，系统会自动生成<b>免登录</b>下载地址
+        （<code>/api/client/download</code>），客户端在登录前就能直接下载。
       </template>
     </el-alert>
 
@@ -56,11 +60,23 @@
             </el-tag>
           </template>
         </el-table-column>
-        <el-table-column prop="download_url" label="下载地址" min-width="200" show-overflow-tooltip>
+        <el-table-column prop="download_url" label="下载地址" min-width="240" show-overflow-tooltip>
           <template #default="{ row }">
-            <el-link v-if="row.download_url" :href="row.download_url" target="_blank" type="primary">
-              {{ row.download_url }}
-            </el-link>
+            <template v-if="row.download_url">
+              <div style="font-size:12px; color:#999;">配置值：{{ row.download_url }}</div>
+              <el-link
+                v-if="row.public_url"
+                :href="row.public_url"
+                target="_blank"
+                type="primary"
+                style="font-size:12px;"
+              >
+                客户端实际下载：{{ row.public_url }}
+              </el-link>
+              <el-link v-else :href="row.download_url" target="_blank" type="primary" style="font-size:12px;">
+                {{ row.download_url }}
+              </el-link>
+            </template>
             <span v-else style="color:#999;">未填写</span>
           </template>
         </el-table-column>
@@ -121,7 +137,20 @@
           </span>
         </el-form-item>
         <el-form-item label="下载地址">
-          <el-input v-model="form.download_url" placeholder="https://... 新版安装包地址" />
+          <div style="display:flex; gap:8px; width:100%;">
+            <el-input
+              v-model="form.download_url"
+              placeholder="https://... 外链，或 电脑工具/xxx.exe 这样的共享目录相对路径"
+            />
+            <el-button style="flex-shrink:0;" @click="openPicker">从共享文件选择</el-button>
+          </div>
+          <div style="color:#999; font-size:12px; margin-top:4px; line-height:1.7;">
+            安装包已上传到 <code>shared_files</code>（如「电脑工具」「手机工具」等子目录）时，
+            直接点右侧按钮挑选即可，无需手抄路径。<br />
+            客户端实际拿到的地址（免登录）：
+            <span v-if="previewUrl" style="color:#409eff;">{{ previewUrl }}</span>
+            <span v-else style="color:#bbb;">填写后自动生成</span>
+          </div>
         </el-form-item>
         <el-form-item label="更新说明">
           <el-input
@@ -144,11 +173,47 @@
         <el-button type="primary" :loading="saving" @click="onSave">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 共享文件选择器：列出 shared_files 下的目录与文件，选中即回填相对路径 -->
+    <el-dialog v-model="pickerVisible" title="选择安装包（shared_files）" width="640px">
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
+        <el-button size="small" :disabled="!pickerPath" @click="loadShared(pickerParent)">
+          返回上级
+        </el-button>
+        <span style="color:#666; font-size:12px;">
+          当前目录：{{ pickerPath || '（根目录）' }}
+        </span>
+      </div>
+      <el-table
+        :data="pickerItems"
+        v-loading="pickerLoading"
+        size="small"
+        border
+        height="360"
+        @row-dblclick="onPickerRow"
+      >
+        <el-table-column label="名称" min-width="260">
+          <template #default="{ row }">
+            <span :style="row.is_dir ? 'font-weight:600;' : ''">{{ row.name }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="大小" width="110" align="center" prop="size_text" />
+        <el-table-column label="操作" width="90" align="center">
+          <template #default="{ row }">
+            <el-button v-if="row.is_dir" link type="primary" @click="loadShared(row.path)">进入</el-button>
+            <el-button v-else link type="success" @click="pickFile(row)">选择</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+      <div style="color:#999; font-size:12px; margin-top:8px;">
+        双击目录进入、双击文件直接选中。
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import request from '@/api/request';
 
@@ -193,6 +258,57 @@ const loadClients = async () => {
 // 切换客户端标识时，默认将当前记录重置为"新版本"（id=0 会造成误改）
 // 仅在新建场景下有用；编辑时该回调不影响已选中的 id。
 const onClientChange = () => {};
+
+// ---------- 共享文件选择器 ----------
+const pickerVisible = ref(false);
+const pickerLoading = ref(false);
+const pickerPath = ref('');
+const pickerParent = ref('');
+const pickerItems = ref([]);
+
+const loadShared = async (path = '') => {
+  pickerLoading.value = true;
+  try {
+    const res = await request.get('/client/list_shared', { params: { path } });
+    pickerPath.value = res.data.path || '';
+    pickerParent.value = res.data.parent || '';
+    pickerItems.value = res.data.items || [];
+  } catch (e) {
+    ElMessage.error('读取共享目录失败：' + (e?.response?.data?.message || e?.message || '请确认有管理员权限'));
+    pickerItems.value = [];
+  } finally {
+    pickerLoading.value = false;
+  }
+};
+
+const openPicker = () => {
+  pickerVisible.value = true;
+  loadShared('');
+};
+
+const onPickerRow = (row) => {
+  if (row.is_dir) {
+    loadShared(row.path);
+  } else {
+    pickFile(row);
+  }
+};
+
+const pickFile = (row) => {
+  form.value.download_url = row.path;
+  pickerVisible.value = false;
+  ElMessage.success('已选择：' + row.path);
+};
+
+// 客户端最终拿到的下载地址：相对路径会展开成免登录端点 /api/client/download
+const previewUrl = computed(() => {
+  const url = (form.value.download_url || '').trim();
+  if (!url) return '';
+  if (/^https?:\/\//i.test(url)) return url;
+  const key = encodeURIComponent(form.value.client_key || '');
+  const ver = encodeURIComponent((form.value.version || '').trim());
+  return `${window.location.origin}/api/client/download?key=${key}&v=${ver}`;
+});
 
 // 由 client_key 反查友好名称（找不到就原样显示 key）
 const clientName = (key) => {

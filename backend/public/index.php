@@ -593,8 +593,12 @@ $router->add("GET",  "/api/weekly/export",         [\App\Controllers\WeeklyContr
 //   否则客户端无法在「登录前」做版本预检，"不更新无法进入"就无从实现。
 $router->add("GET",  "/api/client/check_version",  [\App\Controllers\ClientVersionController::class, "checkVersion"]);
 $router->add("POST", "/api/client/check_version",  [\App\Controllers\ClientVersionController::class, "checkVersion"]);
+// 免登录下载更新包：客户端「登录前」用系统浏览器打开此地址，不能要求会话。
+// 不挂任何中间件；控制器内部只认 client_versions 中已发布记录登记的地址，不接受任意 path。
+$router->add("GET",  "/api/client/download",       [\App\Controllers\ClientVersionController::class, "download"]);
 // 管理接口（控制器内部自行校验管理员身份）
 $router->add("GET",  "/api/client/list_clients",   [\App\Controllers\ClientVersionController::class, "listClients"]);
+$router->add("GET",  "/api/client/list_shared",    [\App\Controllers\ClientVersionController::class, "listShared"]);
 $router->add("GET",  "/api/client/list_versions",  [\App\Controllers\ClientVersionController::class, "listVersions"]);
 $router->add("POST", "/api/client/save_version",   [\App\Controllers\ClientVersionController::class, "saveVersion"]);
 $router->add("POST", "/api/client/delete_version", [\App\Controllers\ClientVersionController::class, "deleteVersion"]);
@@ -613,8 +617,9 @@ $pwdGuardWhitelist = [
     "/api/auth/logout",
     "/api/auth/me",
     "/api/auth/change_password",
-    // 客户端版本预检是公开接口，不应被强制改密拦截
+    // 客户端版本预检与免登录下载都是公开接口，不应被强制改密拦截
     "/api/client/check_version",
+    "/api/client/download",
 ];
 if (!empty($_SESSION["must_change_password"])
     && str_starts_with($pwdGuardPath, "/api/")
