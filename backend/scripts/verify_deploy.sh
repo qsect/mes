@@ -422,6 +422,30 @@ if [ "$FT_OK" -eq 3 ] && grep -q "FAULT_DESC_REQUIRED = \['其他'\]" "$B/app/Co
 else
     echo "  [缺失]   故障类型预设或条件必填规则不符（期望：车辆变形/车辆掉螺丝/轮子异常/其他）"; fail=$((fail+1))
 fi
+# ★ 档案维护权限必须锁定为「超级管理员 / 班长」，
+#   绝不能退化成 ModulePerm::canEdit（那会让任何被勾选 can_edit 的人都能改档案）。
+if [ -f "$B/app/Core/UserRole.php" ] \
+   && grep -q "UserRole::canMaintain" "$B/app/Controllers/AgingCartController.php" 2>/dev/null \
+   && grep -q "canEditCart" "$B/app/Controllers/AgingCartController.php" 2>/dev/null \
+   && ! grep -q "if (!\$this->canManage)" "$B/app/Controllers/AgingCartController.php" 2>/dev/null; then
+    echo "  [OK]     档案维护权限已限定为超级管理员/班长"; pass=$((pass+1))
+else
+    echo "  [缺失]   档案维护权限未正确限定（应为 UserRole::canMaintain，而非 canManage）"; fail=$((fail+1))
+fi
+# 列表默认只读：只有处于编辑态的行才渲染输入控件
+if grep -q "isEditing(row)" "$F/src/views/aging_cart/Index.vue" 2>/dev/null \
+   && ! grep -q "v-if=\"canManage\"" "$F/src/views/aging_cart/Index.vue" 2>/dev/null; then
+    echo "  [OK]     列表默认只读（仅编辑态渲染输入控件）"; pass=$((pass+1))
+else
+    echo "  [缺失]   列表未实现「默认只读 + 点击编辑」"; fail=$((fail+1))
+fi
+# 看板与列表联动：两者必须共用 carts 数据源
+if grep -q "v-for=\"c in carts\"" "$F/src/views/aging_cart/Index.vue" 2>/dev/null \
+   && grep -q "filteredCarts" "$F/src/views/aging_cart/Index.vue" 2>/dev/null; then
+    echo "  [OK]     格子看板与列表共用 carts 数据源（天然联动）"; pass=$((pass+1))
+else
+    echo "  [缺失]   看板与列表未共享数据，改动不会联动"; fail=$((fail+1))
+fi
 if [ -f "$F/src/views/aging_cart/Index.vue" ]; then
     echo "  [OK]     前端视图 views/aging_cart/Index.vue 存在"; pass=$((pass+1))
 else

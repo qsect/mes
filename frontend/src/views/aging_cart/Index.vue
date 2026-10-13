@@ -222,6 +222,34 @@
 
       <!-- ============ 老化车列表 ============ -->
       <el-tab-pane :label="`老化车列表(${cartTotal})`" name="carts">
+        <!-- 状态看板：一个编号一个方块，正常绿 / 故障红；与下方列表共享 carts 数据，天然联动 -->
+        <div class="ac-card">
+          <div class="ac-board-head">
+            <span class="ac-board-title">状态看板</span>
+            <span class="ac-legend">
+              <span><i class="ac-dot" style="background:#67c23a;"></i>正常 {{ normalCartCount }}</span>
+              <span><i class="ac-dot" style="background:#f56c6c;"></i>故障 {{ faultCartCount }}</span>
+            </span>
+            <span class="ac-legend-tip">点击方块可只看这辆车，再点一次取消</span>
+          </div>
+          <div class="ac-grid" v-loading="loadingCarts">
+            <div
+              v-for="c in carts"
+              :key="c.cart_no"
+              class="ac-cell"
+              :class="[
+                isFault(c) ? 'ac-cell-fault' : 'ac-cell-normal',
+                cartFilter.cart_no === c.cart_no ? 'ac-cell-active' : ''
+              ]"
+              :title="cellTitle(c)"
+              @click="toggleFocusCart(c.cart_no)"
+            >
+              <div class="ac-cell-no">{{ c.cart_no }}</div>
+              <div class="ac-cell-layers" v-if="c.layers">{{ c.layers }}层</div>
+            </div>
+          </div>
+        </div>
+
         <div class="ac-card">
           <div class="ac-filter">
             <el-select v-model="cartFilter.status" placeholder="状态" clearable size="small" style="width:110px;">
@@ -242,16 +270,24 @@
             </el-select>
             <el-input
               v-model="cartFilter.keyword"
-              placeholder="编号 / 备注 / 故障说明"
+              placeholder="备注 / 故障说明关键词"
               clearable
               size="small"
               style="width:210px;"
             />
             <el-button size="small" @click="resetCartFilter">重置</el-button>
+            <el-tag
+              v-if="cartFilter.cart_no"
+              closable
+              size="small"
+              type="primary"
+              effect="plain"
+              @close="cartFilter.cart_no = ''"
+            >只看 {{ cartFilter.cart_no }}</el-tag>
             <div style="flex:1;"></div>
             <span class="ac-legend-tip">
-              <template v-if="canManage">层数、状态、使用位置、备注可直接点单元格修改，改动即时保存</template>
-              <template v-else>车辆档案仅管理员可维护</template>
+              <template v-if="canEditCart">列表默认只读，点操作列「编辑」后才能修改</template>
+              <template v-else>车辆档案仅超级管理员和班长可维护</template>
             </span>
           </div>
 
@@ -274,7 +310,7 @@
             <el-table-column label="层数" width="105" align="center">
               <template #default="{ row }">
                 <el-input-number
-                  v-if="canManage"
+                  v-if="isEditing(row)"
                   v-model="row.layers"
                   :min="1"
                   :max="99"
@@ -283,7 +319,6 @@
                   size="small"
                   style="width:78px;"
                   placeholder="-"
-                  @change="(v) => quickSaveCart(row, { layers: v })"
                 />
                 <span v-else :style="row.layers ? '' : 'color:#c0c4cc;'">{{ row.layers || '-' }}</span>
               </template>
@@ -292,11 +327,10 @@
             <el-table-column label="状态" width="140" align="center">
               <template #default="{ row }">
                 <el-select
-                  v-if="canEditStatus(row)"
+                  v-if="isEditing(row) && statusEditable(row)"
                   v-model="row.status"
                   size="small"
                   style="width:110px;"
-                  @change="(v) => quickSaveCart(row, { status: v })"
                 >
                   <el-option label="正常" value="normal" />
                   <el-option label="故障" value="fault" />
@@ -322,11 +356,10 @@
             <el-table-column label="使用位置" width="130" align="center">
               <template #default="{ row }">
                 <el-select
-                  v-if="canManage"
+                  v-if="isEditing(row)"
                   v-model="row.usage_type"
                   size="small"
                   style="width:110px;"
-                  @change="(v) => quickSaveCart(row, { usage_type: v })"
                 >
                   <el-option v-for="u in usageTypes" :key="u" :label="u" :value="u" />
                 </el-select>
@@ -337,12 +370,11 @@
             <el-table-column label="备注" min-width="190">
               <template #default="{ row }">
                 <el-input
-                  v-if="canManage"
+                  v-if="isEditing(row)"
                   v-model="row.remark"
                   size="small"
                   maxlength="255"
-                  placeholder="点击填写，回车保存"
-                  @change="(v) => quickSaveCart(row, { remark: v })"
+                  placeholder="请填写备注"
                 />
                 <span v-else :style="row.remark ? '' : 'color:#c0c4cc;'">{{ row.remark || '-' }}</span>
               </template>
@@ -356,16 +388,37 @@
               </template>
             </el-table-column>
 
-            <el-table-column label="操作" width="130" fixed="right" align="center">
+            <el-table-column label="操作" width="180" fixed="right" align="center">
               <template #default="{ row }">
-                <el-button
-                  type="primary"
-                  size="small"
-                  link
-                  :disabled="isFault(row)"
-                  @click="openReport(row.cart_no)"
-                >{{ isFault(row) ? '已报修' : '报修' }}</el-button>
-                <el-button size="small" link @click="filterByCart(row.cart_no)">记录</el-button>
+                <!-- 编辑态：保存 / 取消（同一时刻只允许编辑一行） -->
+                <template v-if="isEditing(row)">
+                  <el-button
+                    type="success"
+                    size="small"
+                    link
+                    :loading="saving"
+                    @click="saveEditCart(row)"
+                  >保存</el-button>
+                  <el-button size="small" link @click="cancelEditCart(row)">取消</el-button>
+                </template>
+                <!-- 只读态：有权限才显示「编辑」 -->
+                <template v-else>
+                  <el-button
+                    v-if="canEditCart"
+                    type="warning"
+                    size="small"
+                    link
+                    @click="beginEditCart(row)"
+                  >编辑</el-button>
+                  <el-button
+                    type="primary"
+                    size="small"
+                    link
+                    :disabled="isFault(row)"
+                    @click="openReport(row.cart_no)"
+                  >{{ isFault(row) ? '已报修' : '报修' }}</el-button>
+                  <el-button size="small" link @click="filterByCart(row.cart_no)">记录</el-button>
+                </template>
               </template>
             </el-table-column>
           </el-table>
@@ -544,6 +597,8 @@ const descRequiredTypes = ref([]);
 const usageTypes = ref(['固定使用', '流动使用']);
 const rules = ref([]);
 const canManage = ref(false);
+/** 档案维护权限：仅超级管理员 + 班长（由后端下发，前端只做按钮级隐藏） */
+const canEditCart = ref(false);
 
 const board = ref({});
 const records = ref([]);
@@ -569,6 +624,7 @@ const cartFilter = reactive({
   status: '',
   usage_type: '',
   layers: '',
+  cart_no: '',
   keyword: ''
 });
 
@@ -587,6 +643,7 @@ const maxCartNo = computed(() => String(cartTotal.value || 140).padStart(3, '0')
 const filteredCarts = computed(() => {
   const kw = String(cartFilter.keyword || '').trim().toLowerCase();
   return carts.value.filter((c) => {
+    if (cartFilter.cart_no && c.cart_no !== cartFilter.cart_no) return false;
     if (cartFilter.status === 'normal' && isFault(c)) return false;
     if (cartFilter.status === 'fault' && !isFault(c)) return false;
     if (cartFilter.usage_type && c.usage_type !== cartFilter.usage_type) return false;
@@ -640,9 +697,65 @@ function faultTagText(row) {
   return '故障';
 }
 
-/** 已有报修单的车不允许手动改状态，必须走「完成维修」流程 */
-function canEditStatus(row) {
-  return canManage.value && (row.status === 'normal' || row.status === 'fault');
+/** 状态能否被手动改写：存在未完成报修单时不可改（必须走「完成维修」） */
+function statusEditable(row) {
+  return row.status === 'normal' || row.status === 'fault';
+}
+
+// ---- 行编辑态 ----
+// 列表默认只读；点操作列「编辑」后该行才可改。同一时刻只允许编辑一行 ——
+// 用对象引用（而非 cart_no）判定，避免编号重复时错行。
+const editingRow = ref(null);
+/** 进入编辑前的行数据快照，用于「取消」或保存失败时回滚 */
+let cartSnapshot = null;
+
+function isEditing(row) {
+  return editingRow.value === row;
+}
+
+function beginEditCart(row) {
+  if (editingRow.value && editingRow.value !== row) {
+    cancelEditCart(editingRow.value);
+  }
+  cartSnapshot = {
+    layers: row.layers,
+    status: row.status,
+    usage_type: row.usage_type,
+    remark: row.remark
+  };
+  editingRow.value = row;
+}
+
+function cancelEditCart(row) {
+  if (cartSnapshot) {
+    Object.assign(row, cartSnapshot);
+  }
+  cartSnapshot = null;
+  editingRow.value = null;
+}
+
+async function saveEditCart(row) {
+  saving.value = true;
+  try {
+    await request.post('/aging_cart/save_cart', {
+      cart_no: row.cart_no,
+      layers: row.layers,
+      status: row.status,
+      usage_type: row.usage_type,
+      remark: row.remark
+    });
+    ElMessage.success(`${row.cart_no} 已保存`);
+    editingRow.value = null;
+    cartSnapshot = null;
+    refreshAll();
+  } catch (e) {
+    // 失败：回滚到快照，保留在编辑态让用户修正后重试
+    if (cartSnapshot) {
+      Object.assign(row, cartSnapshot);
+    }
+  } finally {
+    saving.value = false;
+  }
 }
 
 // ---- 故障现象的条件必填：仅「其他」需要填写 ----
@@ -690,6 +803,9 @@ async function loadInit() {
     }
     rules.value = d.rules || [];
     canManage.value = !!d.can_manage;
+    if (typeof d.can_edit_cart === 'boolean') {
+      canEditCart.value = d.can_edit_cart;
+    }
   } catch (e) {
     /* 拦截器已提示 */
   }
@@ -750,9 +866,15 @@ async function loadCarts() {
     if (Array.isArray(d.usage_types) && d.usage_types.length) {
       usageTypes.value = d.usage_types;
     }
+    if (typeof d.can_edit_cart === 'boolean') {
+      canEditCart.value = d.can_edit_cart;
+    }
     if (carts.value.length) {
       cartTotal.value = carts.value.length;
     }
+    // 列表数据被整体替换后，旧的编辑行引用失效，直接退出编辑态
+    editingRow.value = null;
+    cartSnapshot = null;
   } catch (e) {
     /* 拦截器已提示 */
   } finally {
@@ -780,22 +902,29 @@ function resetCartFilter() {
   cartFilter.status = '';
   cartFilter.usage_type = '';
   cartFilter.layers = '';
+  cartFilter.cart_no = '';
   cartFilter.keyword = '';
 }
 
-/**
- * 车辆档案的单元格即时保存（仅管理员可用）。
- * 保存失败时重新拉取列表，把界面上的本地改动回滚掉，避免显示与库里不一致。
- */
-async function quickSaveCart(row, patch) {
-  try {
-    await request.post('/aging_cart/save_cart', { cart_no: row.cart_no, ...patch });
-    ElMessage.success(`${row.cart_no} 已保存`);
-    loadBoard();
-  } catch (e) {
-    loadCarts();
-  }
+/** 点击看板方块：只看这辆车；再点一次取消 */
+function toggleFocusCart(cartNo) {
+  cartFilter.cart_no = cartFilter.cart_no === cartNo ? '' : cartNo;
 }
+
+/** 看板方块的悬浮提示，与列表同一份数据 */
+function cellTitle(c) {
+  const parts = [`${c.cart_no}（${isFault(c) ? '故障' : '正常'}）`];
+  if (c.layers) parts.push(`${c.layers} 层`);
+  parts.push(c.usage_type || '流动使用');
+  if (isFault(c)) parts.push(`故障：${faultText(c)}`);
+  if (c.repair_times) parts.push(`累计报修 ${c.repair_times} 次`);
+  if (c.last_fixed_at) parts.push(`最近修复 ${c.last_fixed_at}`);
+  return parts.join(' | ');
+}
+
+/** 看板统计：与列表口径一致（非 normal 即故障） */
+const faultCartCount = computed(() => carts.value.filter((c) => isFault(c)).length);
+const normalCartCount = computed(() => carts.value.length - faultCartCount.value);
 
 function filterByCart(cartNo) {
   filter.cart_no = cartNo;
@@ -1133,6 +1262,107 @@ onBeforeUnmount(() => {
 .ac-legend-tip {
   color: #909399;
   font-size: 12px;
+}
+
+/* 状态看板：一个编号一个方块，正常绿 / 故障红 */
+.ac-board-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #606266;
+  margin-bottom: 8px;
+}
+
+.ac-board-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #2c3e50;
+}
+
+.ac-board-head .ac-legend-tip {
+  margin-left: auto;
+}
+
+.ac-legend {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ac-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+
+.ac-grid {
+  display: grid;
+  grid-template-columns: repeat(20, minmax(0, 1fr));
+  gap: 6px;
+}
+
+@media (max-width: 1400px) {
+  .ac-grid {
+    grid-template-columns: repeat(10, minmax(0, 1fr));
+  }
+}
+
+.ac-cell {
+  border: 1px solid #e4e7ed;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all 0.15s;
+  background: #fff;
+}
+
+.ac-cell:hover {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  transform: translateY(-1px);
+}
+
+.ac-cell-body {
+  padding: 6px 2px;
+  text-align: center;
+}
+
+.ac-cell-no {
+  font-family: monospace;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ac-cell-layers {
+  font-size: 10px;
+  color: #909399;
+}
+
+.ac-cell-normal {
+  background: #f0f9eb;
+  border-color: #b3e19d;
+}
+
+.ac-cell-normal .ac-cell-no {
+  color: #67c23a;
+}
+
+.ac-cell-fault {
+  background: #fef0f0;
+  border-color: #fab6b6;
+}
+
+.ac-cell-fault .ac-cell-no {
+  color: #f56c6c;
+}
+
+/* 被看板选中的车：蓝色描边，和下方列表筛选结果对应 */
+.ac-cell-active {
+  outline: 2px solid #409eff;
+  outline-offset: -1px;
 }
 
 .ac-stat-row {

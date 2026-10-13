@@ -6,6 +6,7 @@ use App\Core\Database;
 use App\Core\ModulePerm;
 use App\Core\Response;
 use App\Core\Schema;
+use App\Core\UserRole;
 use App\Core\WorkDuration;
 use App\Services\AuditService;
 use PDO;
@@ -59,6 +60,13 @@ class AgingCartController
     private bool $isAdmin;
     private bool $canManage;
 
+    /**
+     * 是否可维护「老化车档案」（层数 / 状态 / 使用位置 / 备注）。
+     * ★ 与 canManage 区分开：canManage 来自「权限分配」里勾选的 can_edit，
+     *   而档案维护只允许 超级管理员 + 班长级管理角色，不受模块授权开关影响。
+     */
+    private bool $canEditCart;
+
     public function __construct()
     {
         $this->db = Database::getConnection();
@@ -73,6 +81,7 @@ class AgingCartController
         $uname = (string)($this->currentUser['username'] ?? '');
         $this->isAdmin = !empty($this->currentUser['is_admin']) || $uname === 'admin';
         $this->canManage = $this->isAdmin || ModulePerm::canEdit($this->currentUser, self::MODULE);
+        $this->canEditCart = UserRole::canMaintain($this->currentUser);
 
         Schema::ensureOnce(self::MODULE, function () {
             $this->initTables();
@@ -221,6 +230,8 @@ class AgingCartController
                 'cart_total'  => self::CART_TOTAL,
                 'is_admin'    => $this->isAdmin,
                 'can_manage'  => $this->canManage,
+                // 档案维护（列表页改层数/状态/使用位置/备注）仅超管 + 班长
+                'can_edit_cart' => $this->canEditCart,
                 'period'      => WorkDuration::periodRange(WorkDuration::periodLabel($now)),
                 'rules'       => WorkDuration::rules(),
                 'server_time' => $now->format('Y-m-d H:i:s'),
@@ -449,6 +460,7 @@ class AgingCartController
                 'list'           => $rows,
                 'total'          => count($rows),
                 'can_manage'     => $this->canManage,
+                'can_edit_cart'  => $this->canEditCart,
                 'usage_types'    => self::USAGE_TYPES,
                 'status_options' => [
                     ['value' => self::STATUS_NORMAL, 'label' => '正常'],
@@ -899,8 +911,9 @@ class AgingCartController
 
     public function saveCart(): void
     {
-        if (!$this->canManage) {
-            ModulePerm::deny('维护老化车档案');
+        // ★ 档案维护仅限 超级管理员 / 班长级管理角色，不受「权限分配」的 can_edit 影响
+        if (!$this->canEditCart) {
+            Response::error('权限不足：只有超级管理员和班长可以修改老化车档案信息。', [], 403);
             return;
         }
 
