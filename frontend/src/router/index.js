@@ -200,6 +200,13 @@ const routes = [
         component: () => import('@/views/equipment/Index.vue'),
         meta: { title: '设备矩阵总览' }
       },
+      // 老化车维修管理（注意：目录 aging_cart 下文件名是「大写」的 Index.vue，与导入保持一致）
+      {
+        path: 'aging-cart',
+        name: 'AgingCart',
+        component: () => import('@/views/aging_cart/Index.vue'),
+        meta: { title: '老化车维修管理' }
+      },
       // 首件检管理系统
       {
         path: 'first-piece',

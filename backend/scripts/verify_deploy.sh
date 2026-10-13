@@ -377,6 +377,43 @@ else
     echo "  [警告]   shared_files 目录不存在，填写相对路径将无法下载"; warn=$((warn+1))
 fi
 
+echo "── 十八、老化车维修模块 ──"
+# ★ 该模块跨「后端控制器 + 路由 + 前端视图 + 前端路由 + 侧边栏菜单 + modules 表登记」六处，
+#   任一处遗漏都会表现为「页面打不开」或「普通用户看不到菜单」，且都不报错，只能靠自检发现。
+if [ -f "$B/app/Controllers/AgingCartController.php" ]; then
+    echo "  [OK]     AgingCartController.php 已就位"; pass=$((pass+1))
+else
+    echo "  [缺失]   AgingCartController.php 不存在"; fail=$((fail+1))
+fi
+if [ -f "$B/app/Core/WorkDuration.php" ]; then
+    echo "  [OK]     App\\Core\\WorkDuration 已就位（有效维修时长算法）"; pass=$((pass+1))
+else
+    echo "  [缺失]   WorkDuration.php 不存在 → 维修时长无法计算"; fail=$((fail+1))
+fi
+AC_ROUTES=$(grep -c "/api/aging_cart/" "$B/public/index.php" 2>/dev/null | tr -d ' ')
+AC_MW=$(grep -c "aging_cart'\]\]" "$B/public/index.php" 2>/dev/null | tr -d ' ')
+if [ "${AC_ROUTES:-0}" -ge 10 ] && [ "${AC_MW:-0}" -ge 10 ]; then
+    echo "  [OK]     /api/aging_cart/* 路由 ${AC_ROUTES} 条，中间件均为双层方括号"; pass=$((pass+1))
+else
+    echo "  [缺失]   aging_cart 路由不全（路由 ${AC_ROUTES:-0} 条 / 双层方括号 ${AC_MW:-0} 处，期望均 ≥10）"; fail=$((fail+1))
+fi
+if [ -f "$F/src/views/aging_cart/Index.vue" ]; then
+    echo "  [OK]     前端视图 views/aging_cart/Index.vue 存在"; pass=$((pass+1))
+else
+    echo "  [缺失]   前端视图缺失（注意 Linux 区分大小写，应为大写 Index.vue）"; fail=$((fail+1))
+fi
+if grep -q "views/aging_cart/Index.vue" "$F/src/router/index.js" 2>/dev/null; then
+    echo "  [OK]     前端路由已注册"; pass=$((pass+1))
+else
+    echo "  [缺失]   router/index.js 未注册 aging-cart"; fail=$((fail+1))
+fi
+if grep -q "'/aging-cart'" "$F/src/layout/Layout.vue" 2>/dev/null; then
+    echo "  [OK]     侧边栏菜单已加入"; pass=$((pass+1))
+else
+    echo "  [缺失]   Layout.vue 菜单未加入 /aging-cart"; fail=$((fail+1))
+fi
+echo "  [提示]   模块登记需执行一次 SQL：tools/老化车模块初始化.sql（否则普通用户看不到菜单）"
+
 echo ""
 echo "=================================================="
 echo " 通过 $pass 项 / 失败 $fail 项"

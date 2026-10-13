@@ -114,7 +114,8 @@ const menuGroups = {
       { path: '/kitting',          label: '工单齐套查询',   icon: 'Files' },
       { path: '/dispatch-kitting',  label: '包装配送齐套',   icon: 'Box' },
       { path: '/label-print',      label: '标签打印管理',   icon: 'Printer' },
-      { path: '/equipment',        label: '设备矩阵总览',   icon: 'Operation' }
+      { path: '/equipment',        label: '设备矩阵总览',   icon: 'Operation' },
+      { path: '/aging-cart',       label: '老化车维修管理', icon: 'Bicycle' }
     ]
   },
   quality: {

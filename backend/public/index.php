@@ -605,6 +605,19 @@ $router->add("GET",  "/api/client/list_versions",  [\App\Controllers\ClientVersi
 $router->add("POST", "/api/client/save_version",   [\App\Controllers\ClientVersionController::class, "saveVersion"]);
 $router->add("POST", "/api/client/delete_version", [\App\Controllers\ClientVersionController::class, "deleteVersion"]);
 
+// 老化车维修管理 (AgingCart) 路由映射
+// ★ 注意：中间件参数必须是「中间件列表」，单个中间件也要包两层方括号。
+$router->add("GET",  "/api/aging_cart/init",      [\App\Controllers\AgingCartController::class, "init"],      [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
+$router->add("GET",  "/api/aging_cart/dashboard", [\App\Controllers\AgingCartController::class, "dashboard"], [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
+$router->add("GET",  "/api/aging_cart/carts",     [\App\Controllers\AgingCartController::class, "carts"],     [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
+$router->add("GET",  "/api/aging_cart/list",      [\App\Controllers\AgingCartController::class, "list"],      [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
+$router->add("POST", "/api/aging_cart/report",    [\App\Controllers\AgingCartController::class, "report"],    [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
+$router->add("POST", "/api/aging_cart/start",     [\App\Controllers\AgingCartController::class, "start"],     [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
+$router->add("POST", "/api/aging_cart/finish",    [\App\Controllers\AgingCartController::class, "finish"],    [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
+$router->add("POST", "/api/aging_cart/save",      [\App\Controllers\AgingCartController::class, "save"],      [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
+$router->add("POST", "/api/aging_cart/delete",    [\App\Controllers\AgingCartController::class, "delete"],    [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
+$router->add("GET",  "/api/aging_cart/export",    [\App\Controllers\AgingCartController::class, "export"],    [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
+
 // 文件共享模块 (Files) 路由映射
 $router->add("GET",  "/api/files/list",     [\App\Controllers\FilesController::class, "list"],     [['App\\Middlewares\\ModuleViewMiddleware', 'files']]);
 $router->add("GET",  "/api/files/download", [\App\Controllers\FilesController::class, "download"], [['App\\Middlewares\\ModuleViewMiddleware', 'files']]);
