@@ -18,10 +18,16 @@
 --    前端菜单还要在 frontend/src/layout/Layout.vue 的 menuGroups 里同步加一项，
 --    两处缺一都会导致普通用户看不到入口（管理员不受影响）。
 INSERT INTO `modules` (`name`, `module_code`, `category`, `icon`, `route`, `sort_order`, `description`, `status`)
-SELECT '老化车维修管理', 'aging_cart', '生产执行', 'Bicycle', 'aging-cart', 30, '老化车报修、维修计时与维修看板', 1
+SELECT '老化车维修管理', 'aging_cart', '外协与资产', 'Bicycle', 'aging-cart', 30, '老化车报修、维修计时与维修看板', 1
 WHERE NOT EXISTS (
   SELECT 1 FROM `modules` WHERE `module_code` = 'aging_cart'
 );
+
+-- 分类校正：若此前已按旧分类（生产执行）登记过，这里统一改为「外协与资产」，
+-- 与前端侧边栏分组保持一致（category 只影响模块管理页展示，不影响菜单渲染）。
+UPDATE `modules`
+SET `category` = '外协与资产', `icon` = 'Bicycle', `route` = 'aging-cart'
+WHERE `module_code` = 'aging_cart';
 
 -- 2.（可选）直接给某个角色授予查看权限
 --    一般情况下请走页面：「系统管理 → 角色权限」或「权限分配」勾选，不必手写 SQL。

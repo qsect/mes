@@ -21,7 +21,7 @@
         >
           <div class="menu-category-header" @click="toggleGroup(gKey)">
             <span class="cat-title">
-              <el-icon class="cat-icon"><component :is="iconMap[group.icon]" /></el-icon>
+              <el-icon class="cat-icon"><component :is="iconMap[group.icon] || Menu" /></el-icon>
               {{ group.label }}
             </span>
             <span class="cat-right">
@@ -37,7 +37,7 @@
               class="menu-sub-item"
               active-class="active"
             >
-              <el-icon><component :is="iconMap[item.icon]" /></el-icon>
+              <el-icon><component :is="iconMap[item.icon] || Menu" /></el-icon>
               <span>{{ item.label }}</span>
             </router-link>
           </div>
@@ -79,7 +79,10 @@ import {
   Cpu, Odometer, Checked, Select, Box, Timer, Connection, Notebook, Calendar,
   Van, Operation, Crop, Files, Printer, ChatLineRound, Setting, User, Lock, Key,
   Menu, Document, DocumentChecked, Search, TrendCharts, Tickets, WarningFilled,
-  Grid, Tools, HelpFilled, DataAnalysis, ArrowRight, FolderOpened
+  Grid, Tools, HelpFilled, DataAnalysis, ArrowRight, FolderOpened,
+  // 老化车（Bicycle）与客户端版本（Upload）：菜单图标必须在这里登记，
+  // 否则 iconMap 取不到组件，菜单项会静默显示成「没有图标」（不报错）。
+  Bicycle, Upload
 } from '@element-plus/icons-vue';
 import request from '@/api/request';
 
@@ -102,7 +105,8 @@ const iconMap = {
   Cpu, Odometer, Checked, Select, Box, Timer, Connection, Notebook, Calendar,
   Van, Operation, Crop, Files, Printer, ChatLineRound, Setting, User, Lock, Key,
   Menu, Document, DocumentChecked, Search, TrendCharts, Tickets, WarningFilled,
-  Grid, Tools, HelpFilled, DataAnalysis, FolderOpened
+  Grid, Tools, HelpFilled, DataAnalysis, FolderOpened,
+  Bicycle, Upload
 };
 
 const menuGroups = {
@@ -114,8 +118,7 @@ const menuGroups = {
       { path: '/kitting',          label: '工单齐套查询',   icon: 'Files' },
       { path: '/dispatch-kitting',  label: '包装配送齐套',   icon: 'Box' },
       { path: '/label-print',      label: '标签打印管理',   icon: 'Printer' },
-      { path: '/equipment',        label: '设备矩阵总览',   icon: 'Operation' },
-      { path: '/aging-cart',       label: '老化车维修管理', icon: 'Bicycle' }
+      { path: '/equipment',        label: '设备矩阵总览',   icon: 'Operation' }
     ]
   },
   quality: {
@@ -152,8 +155,9 @@ const menuGroups = {
     label: '外协与资产',
     icon: 'Box',
     items: [
-      { path: '/osm',    label: '外协管理系统',   icon: 'Van' },
-      { path: '/assets', label: '资产台账管理',   icon: 'Box' }
+      { path: '/osm',        label: '外协管理系统',   icon: 'Van' },
+      { path: '/assets',     label: '资产台账管理',   icon: 'Box' },
+      { path: '/aging-cart', label: '老化车维修管理', icon: 'Bicycle' }
     ]
   },
   hr: {

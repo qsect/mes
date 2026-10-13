@@ -412,6 +412,18 @@ if grep -q "'/aging-cart'" "$F/src/layout/Layout.vue" 2>/dev/null; then
 else
     echo "  [缺失]   Layout.vue 菜单未加入 /aging-cart"; fail=$((fail+1))
 fi
+# ★ 菜单图标必须在 Layout.vue 顶部 import 并写进 iconMap，否则 <component :is> 取不到组件，
+#   菜单项会「静默没有图标」——不报错、不告警，只能靠这里扫出来。
+if grep -q "Bicycle" "$F/src/layout/Layout.vue" 2>/dev/null && grep -q "iconMap = {" "$F/src/layout/Layout.vue" 2>/dev/null; then
+    echo "  [OK]     菜单图标 Bicycle 已导入"; pass=$((pass+1))
+else
+    echo "  [缺失]   Layout.vue 未导入 Bicycle 图标 → 老化车菜单项会显示成没有图标"; fail=$((fail+1))
+fi
+if grep -q "iconMap\[item.icon\] || Menu" "$F/src/layout/Layout.vue" 2>/dev/null; then
+    echo "  [OK]     图标渲染已带兜底（未登记图标显示默认图标而非空白）"; pass=$((pass+1))
+else
+    echo "  [警告]   图标渲染缺兜底，新增图标漏登记时会显示空白"; warn=$((warn+1))
+fi
 echo "  [提示]   模块登记需执行一次 SQL：tools/老化车模块初始化.sql（否则普通用户看不到菜单）"
 
 echo ""
