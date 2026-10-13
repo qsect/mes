@@ -17,7 +17,7 @@ use Throwable;
 class Schema
 {
     /** 标记文件版本号：任何表结构变更后 +1，即可强制所有节点重新探测一次 */
-    public const VERSION = '2';
+    public const VERSION = '3';
 
     /** 请求内记忆，避免同一请求内重复 stat 文件 */
     private static array $readyMemo = [];

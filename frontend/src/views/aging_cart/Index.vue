@@ -12,7 +12,7 @@
         </span>
       </div>
       <div class="ac-head-right">
-        <el-button type="primary" size="small" @click="openReport">
+        <el-button type="primary" size="small" @click="openReport()">
           <el-icon class="mr-1"><Plus /></el-icon> 报修
         </el-button>
         <el-button size="small" @click="refreshAll">
@@ -26,7 +26,10 @@
       <div class="ac-stat" style="border-left-color:#e6a23c;">
         <div class="ac-stat-value" style="color:#e6a23c;">{{ board.need_repair || 0 }}</div>
         <div class="ac-stat-label">需要维修（辆）</div>
-        <div class="ac-stat-sub">待修 {{ board.pending_count || 0 }} · 维修中 {{ board.repairing_count || 0 }}</div>
+        <div class="ac-stat-sub">
+          待修 {{ board.pending_count || 0 }} · 维修中 {{ board.repairing_count || 0 }}
+          <template v-if="board.manual_fault"> · 手动标记 {{ board.manual_fault }}</template>
+        </div>
       </div>
       <div class="ac-stat" style="border-left-color:#409EFF;">
         <div class="ac-stat-value" style="color:#409EFF;">{{ board.repairing_count || 0 }}</div>
@@ -142,7 +145,12 @@
                 <span>{{ row.fault_type || '-' }}</span>
               </template>
             </el-table-column>
-            <el-table-column prop="fault_desc" label="故障现象" min-width="200" show-overflow-tooltip />
+            <el-table-column label="故障现象" min-width="200" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span v-if="row.fault_desc">{{ row.fault_desc }}</span>
+                <span v-else style="color:#c0c4cc;">{{ row.fault_type || '-' }}</span>
+              </template>
+            </el-table-column>
             <el-table-column prop="status" label="状态" width="90" align="center">
               <template #default="{ row }">
                 <el-tag :type="statusTagType(row.status)" size="small">{{ statusText(row.status) }}</el-tag>
@@ -212,39 +220,155 @@
         </div>
       </el-tab-pane>
 
-      <!-- ============ 老化车总览 ============ -->
-      <el-tab-pane :label="`老化车总览(${cartTotal})`" name="carts">
+      <!-- ============ 老化车列表 ============ -->
+      <el-tab-pane :label="`老化车列表(${cartTotal})`" name="carts">
         <div class="ac-card">
-          <div class="ac-legend">
-            <span><i class="ac-dot" style="background:#67c23a;"></i>正常</span>
-            <span><i class="ac-dot" style="background:#e6a23c;"></i>待维修</span>
-            <span><i class="ac-dot" style="background:#409EFF;"></i>维修中</span>
-            <span class="ac-legend-tip">点击车号可查看该车的报修记录</span>
-          </div>
-          <div class="ac-grid" v-loading="loadingCarts">
-            <div
-              v-for="c in carts"
-              :key="c.cart_no"
-              class="ac-cell"
-              :class="'ac-cell-' + c.status"
-              @click="filterByCart(c.cart_no)"
+          <div class="ac-filter">
+            <el-select v-model="cartFilter.status" placeholder="状态" clearable size="small" style="width:110px;">
+              <el-option label="正常" value="normal" />
+              <el-option label="故障" value="fault" />
+            </el-select>
+            <el-select
+              v-model="cartFilter.usage_type"
+              placeholder="使用位置"
+              clearable
+              size="small"
+              style="width:120px;"
             >
-              <el-tooltip placement="top" :disabled="c.status === 'normal'">
-                <template #content>
-                  <div style="font-size:12px; line-height:1.6;">
-                    <div><b>{{ c.cart_no }}</b>（{{ cartStatusText(c.status) }}）</div>
-                    <div v-if="c.current_fault">故障：{{ c.current_fault }}</div>
-                    <div>累计报修 {{ c.repair_times }} 次</div>
-                    <div v-if="c.last_fixed_at">最近修复：{{ c.last_fixed_at }}</div>
-                  </div>
-                </template>
-                <div class="ac-cell-body">
-                  <div class="ac-cell-no">{{ c.cart_no }}</div>
-                  <div class="ac-cell-times" v-if="c.repair_times > 0">{{ c.repair_times }}次</div>
-                </div>
-              </el-tooltip>
-            </div>
+              <el-option v-for="u in usageTypes" :key="u" :label="u" :value="u" />
+            </el-select>
+            <el-select v-model="cartFilter.layers" placeholder="层数" clearable size="small" style="width:100px;">
+              <el-option v-for="n in layerOptions" :key="n" :label="`${n} 层`" :value="n" />
+            </el-select>
+            <el-input
+              v-model="cartFilter.keyword"
+              placeholder="编号 / 备注 / 故障说明"
+              clearable
+              size="small"
+              style="width:210px;"
+            />
+            <el-button size="small" @click="resetCartFilter">重置</el-button>
+            <div style="flex:1;"></div>
+            <span class="ac-legend-tip">
+              <template v-if="canManage">层数、状态、使用位置、备注可直接点单元格修改，改动即时保存</template>
+              <template v-else>车辆档案仅管理员可维护</template>
+            </span>
           </div>
+
+          <el-table
+            v-loading="loadingCarts"
+            :data="filteredCarts"
+            size="small"
+            border
+            stripe
+            height="560"
+            style="width:100%;"
+            empty-text="没有符合条件的老化车"
+          >
+            <el-table-column prop="cart_no" label="编号" width="80" align="center" fixed>
+              <template #default="{ row }">
+                <b style="font-family:monospace;">{{ row.cart_no }}</b>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="层数" width="105" align="center">
+              <template #default="{ row }">
+                <el-input-number
+                  v-if="canManage"
+                  v-model="row.layers"
+                  :min="1"
+                  :max="99"
+                  :precision="0"
+                  :controls="false"
+                  size="small"
+                  style="width:78px;"
+                  placeholder="-"
+                  @change="(v) => quickSaveCart(row, { layers: v })"
+                />
+                <span v-else :style="row.layers ? '' : 'color:#c0c4cc;'">{{ row.layers || '-' }}</span>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="状态" width="140" align="center">
+              <template #default="{ row }">
+                <el-select
+                  v-if="canEditStatus(row)"
+                  v-model="row.status"
+                  size="small"
+                  style="width:110px;"
+                  @change="(v) => quickSaveCart(row, { status: v })"
+                >
+                  <el-option label="正常" value="normal" />
+                  <el-option label="故障" value="fault" />
+                </el-select>
+                <el-tooltip
+                  v-else-if="isFault(row)"
+                  :content="`已生成报修单（${statusText(row.status)}），完成维修后状态自动恢复为正常`"
+                  placement="top"
+                >
+                  <el-tag type="danger" size="small">{{ faultTagText(row) }}</el-tag>
+                </el-tooltip>
+                <el-tag v-else type="success" size="small">正常</el-tag>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="故障说明" min-width="210" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span v-if="isFault(row)" style="color:#f56c6c;">{{ faultText(row) }}</span>
+                <span v-else style="color:#c0c4cc;">-</span>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="使用位置" width="130" align="center">
+              <template #default="{ row }">
+                <el-select
+                  v-if="canManage"
+                  v-model="row.usage_type"
+                  size="small"
+                  style="width:110px;"
+                  @change="(v) => quickSaveCart(row, { usage_type: v })"
+                >
+                  <el-option v-for="u in usageTypes" :key="u" :label="u" :value="u" />
+                </el-select>
+                <span v-else>{{ row.usage_type || '-' }}</span>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="备注" min-width="190">
+              <template #default="{ row }">
+                <el-input
+                  v-if="canManage"
+                  v-model="row.remark"
+                  size="small"
+                  maxlength="255"
+                  placeholder="点击填写，回车保存"
+                  @change="(v) => quickSaveCart(row, { remark: v })"
+                />
+                <span v-else :style="row.remark ? '' : 'color:#c0c4cc;'">{{ row.remark || '-' }}</span>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="累计报修" width="90" align="center">
+              <template #default="{ row }">
+                <span :style="row.repair_times > 0 ? 'color:#e6a23c;font-weight:600;' : 'color:#c0c4cc;'">
+                  {{ row.repair_times || 0 }}
+                </span>
+              </template>
+            </el-table-column>
+
+            <el-table-column label="操作" width="130" fixed="right" align="center">
+              <template #default="{ row }">
+                <el-button
+                  type="primary"
+                  size="small"
+                  link
+                  :disabled="isFault(row)"
+                  @click="openReport(row.cart_no)"
+                >{{ isFault(row) ? '已报修' : '报修' }}</el-button>
+                <el-button size="small" link @click="filterByCart(row.cart_no)">记录</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
         </div>
       </el-tab-pane>
 
@@ -314,26 +438,19 @@
             <el-option v-for="c in cartOptions" :key="c" :label="c" :value="c" />
           </el-select>
         </el-form-item>
-        <el-form-item label="故障类型">
-          <el-select
-            v-model="reportForm.fault_type"
-            filterable
-            allow-create
-            clearable
-            placeholder="可自行输入"
-            style="width:100%;"
-          >
+        <el-form-item label="故障类型" required>
+          <el-select v-model="reportForm.fault_type" placeholder="请选择故障类型" style="width:100%;">
             <el-option v-for="t in faultTypes" :key="t" :label="t" :value="t" />
           </el-select>
         </el-form-item>
-        <el-form-item label="故障现象" required>
+        <el-form-item label="故障现象" :required="descRequired(reportForm.fault_type)">
           <el-input
             v-model="reportForm.fault_desc"
             type="textarea"
             :rows="3"
             maxlength="500"
             show-word-limit
-            placeholder="请描述故障现象，如：第 3 层不通电 / 温度升不上去"
+            :placeholder="descPlaceholder(reportForm.fault_type)"
           />
         </el-form-item>
       </el-form>
@@ -381,19 +498,20 @@
             <el-option v-for="c in cartOptions" :key="c" :label="c" :value="c" />
           </el-select>
         </el-form-item>
-        <el-form-item label="故障类型">
-          <el-select
-            v-model="editForm.fault_type"
-            filterable
-            allow-create
-            clearable
-            style="width:100%;"
-          >
+        <el-form-item label="故障类型" required>
+          <el-select v-model="editForm.fault_type" placeholder="请选择故障类型" style="width:100%;">
             <el-option v-for="t in faultTypes" :key="t" :label="t" :value="t" />
           </el-select>
         </el-form-item>
-        <el-form-item label="故障现象" required>
-          <el-input v-model="editForm.fault_desc" type="textarea" :rows="3" maxlength="500" show-word-limit />
+        <el-form-item label="故障现象" :required="descRequired(editForm.fault_type)">
+          <el-input
+            v-model="editForm.fault_desc"
+            type="textarea"
+            :rows="3"
+            maxlength="500"
+            show-word-limit
+            :placeholder="descPlaceholder(editForm.fault_type)"
+          />
         </el-form-item>
         <el-form-item label="维修备注">
           <el-input v-model="editForm.repair_remark" type="textarea" :rows="2" maxlength="500" show-word-limit />
@@ -421,6 +539,9 @@ const saving = ref(false);
 
 const cartTotal = ref(140);
 const faultTypes = ref([]);
+/** 这些故障类型必须填写故障现象（由后端 init 下发，当前为「其他」） */
+const descRequiredTypes = ref([]);
+const usageTypes = ref(['固定使用', '流动使用']);
 const rules = ref([]);
 const canManage = ref(false);
 
@@ -443,6 +564,14 @@ const filter = reactive({
   to: ''
 });
 
+/** 老化车列表页的筛选条件 */
+const cartFilter = reactive({
+  status: '',
+  usage_type: '',
+  layers: '',
+  keyword: ''
+});
+
 const cartOptions = computed(() => {
   const n = cartTotal.value || 140;
   const arr = [];
@@ -453,6 +582,32 @@ const cartOptions = computed(() => {
 });
 
 const maxCartNo = computed(() => String(cartTotal.value || 140).padStart(3, '0'));
+
+/** 列表页筛选后的老化车 */
+const filteredCarts = computed(() => {
+  const kw = String(cartFilter.keyword || '').trim().toLowerCase();
+  return carts.value.filter((c) => {
+    if (cartFilter.status === 'normal' && isFault(c)) return false;
+    if (cartFilter.status === 'fault' && !isFault(c)) return false;
+    if (cartFilter.usage_type && c.usage_type !== cartFilter.usage_type) return false;
+    if (cartFilter.layers !== '' && cartFilter.layers !== null
+        && Number(c.layers || 0) !== Number(cartFilter.layers)) return false;
+    if (kw) {
+      const hay = `${c.cart_no} ${c.remark || ''} ${faultText(c)} ${c.usage_type || ''}`.toLowerCase();
+      if (!hay.includes(kw)) return false;
+    }
+    return true;
+  });
+});
+
+/** 层数筛选项取自已有数据，避免硬编码一堆用不到的层数 */
+const layerOptions = computed(() => {
+  const s = new Set();
+  carts.value.forEach((c) => {
+    if (c.layers) s.add(Number(c.layers));
+  });
+  return Array.from(s).sort((a, b) => a - b);
+});
 
 const periodLabel = computed(() => (board.value.period && board.value.period.label) || '-');
 const periodStart = computed(() => (board.value.period && board.value.period.start_date) || '-');
@@ -465,8 +620,44 @@ function statusText(s) {
 function statusTagType(s) {
   return { pending: 'warning', repairing: 'primary', done: 'success' }[s] || 'info';
 }
-function cartStatusText(s) {
-  return { normal: '正常', pending: '待维修', repairing: '维修中' }[s] || s || '-';
+// ---- 老化车列表：状态按「正常 / 故障」两态呈现 ----
+// 后端实际存 normal(正常) / pending(待维修) / repairing(维修中) / fault(管理员手动标记)，
+// 除 normal 以外一律视为「故障」；修好后后端会把状态写回 normal，列表里的故障说明随之消失。
+function isFault(row) {
+  return !!row && row.status !== 'normal';
+}
+
+/** 故障说明：仅故障态展示；正常态返回空串，列表上显示为「-」 */
+function faultText(row) {
+  if (!isFault(row)) return '';
+  return row.fault_text || '（未填写，直接标记为故障）';
+}
+
+/** 故障态且不可手动改写时（已有报修单）的标签文案 */
+function faultTagText(row) {
+  if (row.status === 'repairing') return '故障 · 维修中';
+  if (row.status === 'pending') return '故障 · 待维修';
+  return '故障';
+}
+
+/** 已有报修单的车不允许手动改状态，必须走「完成维修」流程 */
+function canEditStatus(row) {
+  return canManage.value && (row.status === 'normal' || row.status === 'fault');
+}
+
+// ---- 故障现象的条件必填：仅「其他」需要填写 ----
+function descRequired(faultType) {
+  return descRequiredTypes.value.includes(faultType);
+}
+
+function descPlaceholder(faultType) {
+  if (faultType === '其他') {
+    return '请详细描述故障现象（选择「其他」时必填）';
+  }
+  if (!faultType) {
+    return '请先选择故障类型';
+  }
+  return '可补充说明具体情况，也可以留空';
 }
 
 // 统计辅助
@@ -493,6 +684,10 @@ async function loadInit() {
     const d = res.data || {};
     cartTotal.value = d.cart_total || 140;
     faultTypes.value = d.fault_types || [];
+    descRequiredTypes.value = d.fault_desc_required || [];
+    if (Array.isArray(d.usage_types) && d.usage_types.length) {
+      usageTypes.value = d.usage_types;
+    }
     rules.value = d.rules || [];
     canManage.value = !!d.can_manage;
   } catch (e) {
@@ -547,7 +742,14 @@ async function loadCarts() {
   loadingCarts.value = true;
   try {
     const res = await request.get('/aging_cart/carts');
-    carts.value = (res.data && res.data.list) || [];
+    const d = res.data || {};
+    carts.value = (d.list || []).map((c) => ({
+      ...c,
+      usage_type: c.usage_type || '流动使用'
+    }));
+    if (Array.isArray(d.usage_types) && d.usage_types.length) {
+      usageTypes.value = d.usage_types;
+    }
     if (carts.value.length) {
       cartTotal.value = carts.value.length;
     }
@@ -574,6 +776,27 @@ function resetFilter() {
   loadList();
 }
 
+function resetCartFilter() {
+  cartFilter.status = '';
+  cartFilter.usage_type = '';
+  cartFilter.layers = '';
+  cartFilter.keyword = '';
+}
+
+/**
+ * 车辆档案的单元格即时保存（仅管理员可用）。
+ * 保存失败时重新拉取列表，把界面上的本地改动回滚掉，避免显示与库里不一致。
+ */
+async function quickSaveCart(row, patch) {
+  try {
+    await request.post('/aging_cart/save_cart', { cart_no: row.cart_no, ...patch });
+    ElMessage.success(`${row.cart_no} 已保存`);
+    loadBoard();
+  } catch (e) {
+    loadCarts();
+  }
+}
+
 function filterByCart(cartNo) {
   filter.cart_no = cartNo;
   filter.status = '';
@@ -598,8 +821,8 @@ function exportRecords() {
 const reportVisible = ref(false);
 const reportForm = reactive({ cart_no: '', fault_type: '', fault_desc: '' });
 
-function openReport() {
-  reportForm.cart_no = '';
+function openReport(cartNo) {
+  reportForm.cart_no = cartNo || '';
   reportForm.fault_type = '';
   reportForm.fault_desc = '';
   reportVisible.value = true;
@@ -610,8 +833,12 @@ async function submitReport() {
     ElMessage.warning('请选择老化车编号');
     return;
   }
-  if (!reportForm.fault_desc.trim()) {
-    ElMessage.warning('请填写故障现象');
+  if (!reportForm.fault_type) {
+    ElMessage.warning('请选择故障类型');
+    return;
+  }
+  if (descRequired(reportForm.fault_type) && !reportForm.fault_desc.trim()) {
+    ElMessage.warning('故障类型为「其他」时，必须填写故障现象');
     return;
   }
   saving.value = true;
@@ -698,8 +925,12 @@ function openEdit(row) {
 }
 
 async function submitEdit() {
-  if (!editForm.fault_desc.trim()) {
-    ElMessage.warning('故障现象不能为空');
+  if (!editForm.fault_type) {
+    ElMessage.warning('请选择故障类型');
+    return;
+  }
+  if (descRequired(editForm.fault_type) && !editForm.fault_desc.trim()) {
+    ElMessage.warning('故障类型为「其他」时，必须填写故障现象');
     return;
   }
   saving.value = true;
@@ -899,90 +1130,9 @@ onBeforeUnmount(() => {
   margin-left: 4px;
 }
 
-.ac-legend {
-  display: flex;
-  gap: 16px;
-  align-items: center;
-  font-size: 12px;
-  color: #606266;
-  margin-bottom: 10px;
-  flex-wrap: wrap;
-}
-
 .ac-legend-tip {
   color: #909399;
-}
-
-.ac-dot {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  border-radius: 2px;
-  margin-right: 4px;
-  vertical-align: middle;
-}
-
-.ac-grid {
-  display: grid;
-  grid-template-columns: repeat(20, minmax(0, 1fr));
-  gap: 6px;
-}
-
-@media (max-width: 1400px) {
-  .ac-grid {
-    grid-template-columns: repeat(10, minmax(0, 1fr));
-  }
-}
-
-.ac-cell {
-  border: 1px solid #e4e7ed;
-  border-radius: 4px;
-  cursor: pointer;
-  transition: all 0.15s;
-  background: #fff;
-}
-
-.ac-cell:hover {
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
-  transform: translateY(-1px);
-}
-
-.ac-cell-body {
-  padding: 6px 2px;
-  text-align: center;
-}
-
-.ac-cell-no {
-  font-family: monospace;
   font-size: 12px;
-  font-weight: 700;
-}
-
-.ac-cell-times {
-  font-size: 10px;
-  color: #909399;
-}
-
-.ac-cell-normal .ac-cell-no {
-  color: #67c23a;
-}
-
-.ac-cell-pending {
-  background: #fdf6ec;
-  border-color: #f5dab1;
-}
-
-.ac-cell-pending .ac-cell-no {
-  color: #e6a23c;
-}
-
-.ac-cell-repairing {
-  background: #ecf5ff;
-  border-color: #b3d8ff;
-}
-
-.ac-cell-repairing .ac-cell-no {
-  color: #409eff;
 }
 
 .ac-stat-row {

@@ -37,6 +37,23 @@ class AgingCartController
     /** 老化车总数（编号 001~140） */
     private const CART_TOTAL = 140;
 
+    /**
+     * 故障类型预设（按需求固定 4 项，顺序即下拉顺序）。
+     * 历史数据中出现过的其它类型会被追加在后面，避免老记录编辑时校验不通过。
+     */
+    private const FAULT_TYPES = ['车辆变形', '车辆掉螺丝', '轮子异常', '其他'];
+
+    /** 只有这些故障类型才强制要求填写故障现象，其余「可写可不写」 */
+    private const FAULT_DESC_REQUIRED = ['其他'];
+
+    /** 使用位置选项，默认「流动使用」 */
+    private const USAGE_TYPES = ['固定使用', '流动使用'];
+    private const DEFAULT_USAGE = '流动使用';
+
+    /** 车辆状态（列表页口径）：后端实际存 normal/pending/repairing/fault，前端只呈现「正常/故障」 */
+    private const STATUS_NORMAL = 'normal';
+    private const STATUS_FAULT = 'fault';
+
     private PDO $db;
     private array $currentUser;
     private bool $isAdmin;
@@ -110,7 +127,9 @@ class AgingCartController
             $this->db->exec("CREATE TABLE IF NOT EXISTS `aging_carts` (
                 `id` INT NOT NULL AUTO_INCREMENT,
                 `cart_no` VARCHAR(10) NOT NULL COMMENT '老化车编号，001-140',
-                `status` VARCHAR(20) NOT NULL DEFAULT 'normal' COMMENT 'normal正常/pending待维修/repairing维修中',
+                `status` VARCHAR(20) NOT NULL DEFAULT 'normal' COMMENT 'normal正常/pending待维修/repairing维修中/fault管理员标记故障',
+                `layers` TINYINT UNSIGNED NULL DEFAULT NULL COMMENT '层数',
+                `usage_type` VARCHAR(20) NOT NULL DEFAULT '流动使用' COMMENT '使用位置：固定使用/流动使用',
                 `location` VARCHAR(64) NOT NULL DEFAULT '' COMMENT '所在区域',
                 `remark` VARCHAR(255) NOT NULL DEFAULT '' COMMENT '备注',
                 `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -145,6 +164,12 @@ class AgingCartController
                 INDEX `idx_finished_at` (`repair_finished_at`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='老化车报修维修记录';");
 
+            // 兼容本模块早期版本：老库缺列时自动补齐（ensureColumn 内部已做存在性判断）
+            Schema::ensureColumn($this->db, 'aging_carts', 'layers',
+                "`layers` TINYINT UNSIGNED NULL DEFAULT NULL COMMENT '层数' AFTER `status`");
+            Schema::ensureColumn($this->db, 'aging_carts', 'usage_type',
+                "`usage_type` VARCHAR(20) NOT NULL DEFAULT '流动使用' COMMENT '使用位置：固定使用/流动使用' AFTER `layers`");
+
             $this->initCarts();
         } catch (Throwable $e) {
             error_log('[AgingCart] 表结构初始化失败: ' . $e->getMessage());
@@ -155,9 +180,11 @@ class AgingCartController
     private function initCarts(): void
     {
         try {
-            $stmt = $this->db->prepare("INSERT IGNORE INTO `aging_carts` (`cart_no`, `status`) VALUES (?, 'normal')");
+            $stmt = $this->db->prepare(
+                "INSERT IGNORE INTO `aging_carts` (`cart_no`, `status`, `usage_type`) VALUES (?, 'normal', ?)"
+            );
             for ($i = 1; $i <= self::CART_TOTAL; $i++) {
-                $stmt->execute([sprintf('%03d', $i)]);
+                $stmt->execute([sprintf('%03d', $i), self::DEFAULT_USAGE]);
             }
         } catch (Throwable $e) {
             error_log('[AgingCart] 老化车台账初始化失败: ' . $e->getMessage());
@@ -179,15 +206,18 @@ class AgingCartController
     public function init(): void
     {
         try {
-            $defaults = ['电源故障', '温控异常', '接触不良', '风扇异常', '线缆破损', '结构损坏', '显示异常', '其他'];
-            $used = $this->db->query("SELECT DISTINCT fault_type FROM `aging_repairs` WHERE fault_type <> '' ORDER BY fault_type ASC")
-                ->fetchAll(PDO::FETCH_COLUMN);
-            $types = array_values(array_unique(array_merge($defaults, is_array($used) ? $used : [])));
-
             $now = $this->now();
 
             Response::success('success', [
-                'fault_types' => $types,
+                // 固定 4 项打头，历史类型追加在后，保证老记录仍可编辑
+                'fault_types'         => $this->allowedFaultTypes(),
+                // 前端据此决定「故障现象」是否必填
+                'fault_desc_required' => self::FAULT_DESC_REQUIRED,
+                'usage_types'         => self::USAGE_TYPES,
+                'status_options'      => [
+                    ['value' => self::STATUS_NORMAL, 'label' => '正常'],
+                    ['value' => self::STATUS_FAULT,  'label' => '故障'],
+                ],
                 'cart_total'  => self::CART_TOTAL,
                 'is_admin'    => $this->isAdmin,
                 'can_manage'  => $this->canManage,
@@ -198,6 +228,42 @@ class AgingCartController
         } catch (Throwable $e) {
             Response::exception($e, '初始化失败');
         }
+    }
+
+    /**
+     * 允许的故障类型 = 预设 4 项 + 历史记录中出现过的类型（后者为兼容老数据）
+     */
+    private function allowedFaultTypes(): array
+    {
+        $types = self::FAULT_TYPES;
+        try {
+            $used = $this->db->query(
+                "SELECT DISTINCT fault_type FROM `aging_repairs` WHERE fault_type <> '' ORDER BY fault_type ASC"
+            )->fetchAll(PDO::FETCH_COLUMN);
+            if (is_array($used)) {
+                foreach ($used as $t) {
+                    $t = trim((string)$t);
+                    if ($t !== '' && !in_array($t, $types, true)) {
+                        $types[] = $t;
+                    }
+                }
+            }
+        } catch (Throwable $e) {
+            error_log('[AgingCart] 读取历史故障类型失败: ' . $e->getMessage());
+        }
+        return $types;
+    }
+
+    /** 该故障类型是否强制要求填写故障现象 */
+    private function faultDescRequired(string $faultType): bool
+    {
+        return in_array($faultType, self::FAULT_DESC_REQUIRED, true);
+    }
+
+    /** 车辆状态在列表页的呈现口径：非 normal 一律「故障」 */
+    private function cartStatusLabel(string $status): string
+    {
+        return $status === self::STATUS_NORMAL ? '正常' : '故障';
     }
 
     // ============================================================
@@ -212,9 +278,18 @@ class AgingCartController
             $ps = $period['start'];
             $pe = $period['end'];
 
-            // 需要维修的老化车（去重）：存在待修或维修中的记录
+            // 需要维修的老化车：车辆状态非正常（含报修/维修中/管理员标记故障），
+            // 或以报修单为准兜底 —— 两者取并集，避免车辆状态与报修单数据漂移时漏统计。
             $needRepair = (int)$this->db->query(
-                "SELECT COUNT(DISTINCT cart_no) FROM `aging_repairs` WHERE status IN ('pending', 'repairing')"
+                "SELECT COUNT(*) FROM `aging_carts` c
+                 WHERE c.status <> 'normal'
+                    OR EXISTS (SELECT 1 FROM `aging_repairs` r
+                               WHERE r.cart_no = c.cart_no AND r.status IN ('pending', 'repairing'))"
+            )->fetchColumn();
+
+            // 管理员手动标记故障、且无报修单的车（与报修单口径区分开）
+            $manualFault = (int)$this->db->query(
+                "SELECT COUNT(*) FROM `aging_carts` WHERE status = 'fault'"
             )->fetchColumn();
 
             $pendingCount = (int)$this->db->query("SELECT COUNT(*) FROM `aging_repairs` WHERE status = 'pending'")->fetchColumn();
@@ -293,6 +368,7 @@ class AgingCartController
                 'period'            => $period,
                 'cart_total'        => self::CART_TOTAL,
                 'need_repair'       => $needRepair,
+                'manual_fault'      => $manualFault,
                 'pending_count'     => $pendingCount,
                 'repairing_count'   => $repairingCount,
                 'normal_count'      => $normalCarts,
@@ -325,9 +401,17 @@ class AgingCartController
         try {
             $sql = "SELECT c.cart_no,
                            c.status,
+                           c.layers,
+                           c.usage_type,
                            c.location,
                            c.remark,
                            (SELECT COUNT(*) FROM `aging_repairs` r WHERE r.cart_no = c.cart_no) AS repair_times,
+                           (SELECT r2.id FROM `aging_repairs` r2
+                            WHERE r2.cart_no = c.cart_no AND r2.status IN ('pending', 'repairing')
+                            ORDER BY r2.reported_at DESC LIMIT 1) AS current_repair_id,
+                           (SELECT r2.fault_type FROM `aging_repairs` r2
+                            WHERE r2.cart_no = c.cart_no AND r2.status IN ('pending', 'repairing')
+                            ORDER BY r2.reported_at DESC LIMIT 1) AS current_fault_type,
                            (SELECT r2.fault_desc FROM `aging_repairs` r2
                             WHERE r2.cart_no = c.cart_no AND r2.status IN ('pending', 'repairing')
                             ORDER BY r2.reported_at DESC LIMIT 1) AS current_fault,
@@ -337,10 +421,39 @@ class AgingCartController
                     ORDER BY c.cart_no ASC";
             $rows = $this->db->query($sql)->fetchAll(PDO::FETCH_ASSOC);
 
+            foreach ($rows as &$r) {
+                $status = (string)$r['status'];
+                $r['layers'] = ($r['layers'] === null || $r['layers'] === '') ? null : (int)$r['layers'];
+                $r['usage_type'] = ((string)$r['usage_type'] === '') ? self::DEFAULT_USAGE : (string)$r['usage_type'];
+                $r['status_label'] = $this->cartStatusLabel($status);
+                $r['is_fault'] = $status !== self::STATUS_NORMAL;
+
+                // 故障说明：仅故障态才有内容；修复后随状态回到 normal，列表里自动不再显示
+                if (!$r['is_fault']) {
+                    $r['fault_text'] = '';
+                } else {
+                    $ft = trim((string)($r['current_fault_type'] ?? ''));
+                    $fd = trim((string)($r['current_fault'] ?? ''));
+                    if ($ft === '' && $fd === '') {
+                        $r['fault_text'] = '（未填写，直接标记为故障）';
+                    } elseif ($fd === '' || $ft === $fd) {
+                        $r['fault_text'] = $ft;
+                    } else {
+                        $r['fault_text'] = $ft . '：' . $fd;
+                    }
+                }
+            }
+            unset($r);
+
             Response::success('success', [
-                'list'       => $rows,
-                'total'      => count($rows),
-                'can_manage' => $this->canManage,
+                'list'           => $rows,
+                'total'          => count($rows),
+                'can_manage'     => $this->canManage,
+                'usage_types'    => self::USAGE_TYPES,
+                'status_options' => [
+                    ['value' => self::STATUS_NORMAL, 'label' => '正常'],
+                    ['value' => self::STATUS_FAULT,  'label' => '故障'],
+                ],
             ]);
         } catch (Throwable $e) {
             Response::exception($e, '获取老化车台账失败');
@@ -454,8 +567,17 @@ class AgingCartController
                 Response::error('请选择或填写老化车编号');
                 return;
             }
-            if ($faultDesc === '') {
-                Response::error('请填写故障现象');
+            if ($faultType === '') {
+                Response::error('请选择故障类型');
+                return;
+            }
+            if (!in_array($faultType, $this->allowedFaultTypes(), true)) {
+                Response::error('故障类型无效，请从预设项中选择');
+                return;
+            }
+            // 只有「其他」强制填写故障现象，其余类型可写可不写
+            if ($this->faultDescRequired($faultType) && $faultDesc === '') {
+                Response::error('故障类型为「' . $faultType . '」时，必须填写故障现象');
                 return;
             }
             if (mb_strlen($faultDesc) > 500) {
@@ -689,8 +811,17 @@ class AgingCartController
                 Response::error('老化车编号不能为空');
                 return;
             }
-            if ($faultDesc === '') {
-                Response::error('故障现象不能为空');
+            if ($faultType === '') {
+                Response::error('请选择故障类型');
+                return;
+            }
+            if (!in_array($faultType, $this->allowedFaultTypes(), true)) {
+                Response::error('故障类型无效，请从预设项中选择');
+                return;
+            }
+            // 与报修保持同一口径：仅「其他」强制填写故障现象
+            if ($this->faultDescRequired($faultType) && $faultDesc === '') {
+                Response::error('故障类型为「' . $faultType . '」时，必须填写故障现象');
                 return;
             }
             if (mb_strlen($faultDesc) > 500 || mb_strlen($remark) > 500) {
@@ -758,6 +889,122 @@ class AgingCartController
             Response::success('删除成功');
         } catch (Throwable $e) {
             Response::exception($e, '删除失败');
+        }
+    }
+
+    // ============================================================
+    //  接口：车辆档案维护（仅管理员）
+    //      支持局部更新：layers / usage_type / remark / status
+    // ============================================================
+
+    public function saveCart(): void
+    {
+        if (!$this->canManage) {
+            ModulePerm::deny('维护老化车档案');
+            return;
+        }
+
+        try {
+            $input = $this->input();
+            $cartNo = trim((string)($input['cart_no'] ?? ''));
+            if ($cartNo === '') {
+                Response::error('老化车编号不能为空');
+                return;
+            }
+
+            $chk = $this->db->prepare("SELECT id FROM `aging_carts` WHERE cart_no = ? LIMIT 1");
+            $chk->execute([$cartNo]);
+            if (!$chk->fetchColumn()) {
+                Response::error('老化车编号不存在，应为 001-' . sprintf('%03d', self::CART_TOTAL));
+                return;
+            }
+
+            // 该车是否存在未完成的报修/维修单（决定状态能否被手动改写）
+            $open = $this->db->prepare(
+                "SELECT status FROM `aging_repairs`
+                 WHERE cart_no = ? AND status IN ('pending', 'repairing')
+                 ORDER BY FIELD(status, 'repairing', 'pending') LIMIT 1"
+            );
+            $open->execute([$cartNo]);
+            $openStatus = $open->fetchColumn();
+
+            $sets = [];
+            $params = [];
+
+            // 层数：可留空（NULL），填写时限定 1~99
+            if (array_key_exists('layers', $input)) {
+                $raw = $input['layers'];
+                if ($raw === null || $raw === '' || $raw === 'null') {
+                    $sets[] = '`layers` = NULL';
+                } else {
+                    $layers = (int)$raw;
+                    if ($layers < 1 || $layers > 99) {
+                        Response::error('层数应在 1 ~ 99 之间');
+                        return;
+                    }
+                    $sets[] = '`layers` = ?';
+                    $params[] = $layers;
+                }
+            }
+
+            // 使用位置
+            if (array_key_exists('usage_type', $input)) {
+                $usage = trim((string)$input['usage_type']);
+                if ($usage !== '') {
+                    if (!in_array($usage, self::USAGE_TYPES, true)) {
+                        Response::error('使用位置只能是：' . implode(' / ', self::USAGE_TYPES));
+                        return;
+                    }
+                    $sets[] = '`usage_type` = ?';
+                    $params[] = $usage;
+                }
+            }
+
+            // 备注
+            if (array_key_exists('remark', $input)) {
+                $remark = trim((string)$input['remark']);
+                if (mb_strlen($remark) > 255) {
+                    Response::error('备注不能超过 255 字');
+                    return;
+                }
+                $sets[] = '`remark` = ?';
+                $params[] = $remark;
+            }
+
+            // 状态：只允许在「正常 / 故障」之间切换，且必须与报修单口径一致
+            if (array_key_exists('status', $input)) {
+                $status = trim((string)$input['status']);
+                if (!in_array($status, [self::STATUS_NORMAL, self::STATUS_FAULT], true)) {
+                    Response::error('状态只能是「正常」或「故障」');
+                    return;
+                }
+                if ($status === self::STATUS_NORMAL && $openStatus) {
+                    Response::error(
+                        '该老化车有未完成的报修/维修记录，请先在「报修记录」中完成维修，状态会自动恢复为正常'
+                    );
+                    return;
+                }
+                // 存在未完成报修单时不覆盖 pending/repairing（列表上同样呈现为「故障」）
+                if (!($status === self::STATUS_FAULT && $openStatus)) {
+                    $sets[] = '`status` = ?';
+                    $params[] = $status;
+                }
+            }
+
+            if (!$sets) {
+                Response::error('没有需要保存的字段');
+                return;
+            }
+
+            $params[] = $cartNo;
+            $upd = $this->db->prepare('UPDATE `aging_carts` SET ' . implode(', ', $sets) . ' WHERE cart_no = ?');
+            $upd->execute($params);
+
+            AuditService::log('老化车维修', '维护车辆档案 ' . $cartNo);
+
+            Response::success('已保存');
+        } catch (Throwable $e) {
+            Response::exception($e, '保存老化车档案失败');
         }
     }
 

@@ -392,10 +392,35 @@ else
 fi
 AC_ROUTES=$(grep -c "/api/aging_cart/" "$B/public/index.php" 2>/dev/null | tr -d ' ')
 AC_MW=$(grep -c "aging_cart'\]\]" "$B/public/index.php" 2>/dev/null | tr -d ' ')
-if [ "${AC_ROUTES:-0}" -ge 10 ] && [ "${AC_MW:-0}" -ge 10 ]; then
+if [ "${AC_ROUTES:-0}" -ge 11 ] && [ "${AC_MW:-0}" -ge 11 ]; then
     echo "  [OK]     /api/aging_cart/* 路由 ${AC_ROUTES} 条，中间件均为双层方括号"; pass=$((pass+1))
 else
-    echo "  [缺失]   aging_cart 路由不全（路由 ${AC_ROUTES:-0} 条 / 双层方括号 ${AC_MW:-0} 处，期望均 ≥10）"; fail=$((fail+1))
+    echo "  [缺失]   aging_cart 路由不全（路由 ${AC_ROUTES:-0} 条 / 双层方括号 ${AC_MW:-0} 处，期望均 ≥11）"; fail=$((fail+1))
+fi
+# 车辆档案（层数/使用位置/状态/备注）维护接口
+if grep -q "/api/aging_cart/save_cart" "$B/public/index.php" 2>/dev/null \
+   && grep -q "function saveCart" "$B/app/Controllers/AgingCartController.php" 2>/dev/null; then
+    echo "  [OK]     save_cart 接口与控制器方法均已就位（车辆档案维护）"; pass=$((pass+1))
+else
+    echo "  [缺失]   save_cart 缺失 → 列表页无法保存层数/使用位置/状态/备注"; fail=$((fail+1))
+fi
+# 车辆档案字段：老库缺列时靠 ensureColumn 自动补齐，漏了会导致 carts 接口整段报错
+if grep -q "'layers'" "$B/app/Controllers/AgingCartController.php" 2>/dev/null \
+   && grep -q "'usage_type'" "$B/app/Controllers/AgingCartController.php" 2>/dev/null \
+   && grep -q "Schema::ensureColumn" "$B/app/Controllers/AgingCartController.php" 2>/dev/null; then
+    echo "  [OK]     车辆档案字段（层数/使用位置）含自动补列"; pass=$((pass+1))
+else
+    echo "  [缺失]   layers/usage_type 或 ensureColumn 补列逻辑缺失"; fail=$((fail+1))
+fi
+# 故障类型按需求固定 4 项，且仅「其他」强制填写故障现象
+FT_OK=0
+for t in 车辆变形 车辆掉螺丝 轮子异常; do
+    grep -q "$t" "$B/app/Controllers/AgingCartController.php" 2>/dev/null && FT_OK=$((FT_OK+1))
+done
+if [ "$FT_OK" -eq 3 ] && grep -q "FAULT_DESC_REQUIRED = \['其他'\]" "$B/app/Controllers/AgingCartController.php" 2>/dev/null; then
+    echo "  [OK]     故障类型预设 4 项，且仅「其他」必填故障现象"; pass=$((pass+1))
+else
+    echo "  [缺失]   故障类型预设或条件必填规则不符（期望：车辆变形/车辆掉螺丝/轮子异常/其他）"; fail=$((fail+1))
 fi
 if [ -f "$F/src/views/aging_cart/Index.vue" ]; then
     echo "  [OK]     前端视图 views/aging_cart/Index.vue 存在"; pass=$((pass+1))
