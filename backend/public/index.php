@@ -616,6 +616,7 @@ $router->add("POST", "/api/aging_cart/start",     [\App\Controllers\AgingCartCon
 $router->add("POST", "/api/aging_cart/finish",    [\App\Controllers\AgingCartController::class, "finish"],    [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
 $router->add("POST", "/api/aging_cart/save",      [\App\Controllers\AgingCartController::class, "save"],      [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
 $router->add("POST", "/api/aging_cart/save_cart", [\App\Controllers\AgingCartController::class, "saveCart"],  [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
+$router->add("POST", "/api/aging_cart/set_cart_total", [\App\Controllers\AgingCartController::class, "setCartTotal"], [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
 $router->add("POST", "/api/aging_cart/delete",    [\App\Controllers\AgingCartController::class, "delete"],    [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
 $router->add("GET",  "/api/aging_cart/export",    [\App\Controllers\AgingCartController::class, "export"],    [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
 

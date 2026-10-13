@@ -281,6 +281,10 @@ class SystemController
     public function roles(): void
     {
         try {
+            // 自动补齐预置岗位角色（如「实习学生」），幂等；
+            // 这样新增角色不必再手工跑 SQL，各环境下拉选项自动一致
+            Schema::ensurePresetRoles($this->db);
+
             $stmt = $this->db->query("SELECT * FROM roles ORDER BY id ASC");
             Response::success('success', $stmt->fetchAll(PDO::FETCH_ASSOC));
         } catch (Throwable $e) {

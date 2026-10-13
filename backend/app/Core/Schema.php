@@ -17,7 +17,7 @@ use Throwable;
 class Schema
 {
     /** 标记文件版本号：任何表结构变更后 +1，即可强制所有节点重新探测一次 */
-    public const VERSION = '3';
+    public const VERSION = '4';
 
     /** 请求内记忆，避免同一请求内重复 stat 文件 */
     private static array $readyMemo = [];
@@ -27,6 +27,17 @@ class Schema
 
     /** 每次请求只探测一次登录限速表 */
     private static bool $loginAttemptsEnsured = false;
+
+    /** 每次请求只探测一次预置角色 */
+    private static bool $presetRolesEnsured = false;
+
+    /**
+     * 系统预置岗位角色：角色名 => [标识 code, 说明 description]
+     * 新增岗位角色只需在此登记一行，各环境访问「岗位角色」下拉时会自动补齐。
+     */
+    private const PRESET_ROLES = [
+        '实习学生' => ['intern_student', '实习学生：跟岗学习人员，模块权限需单独分配'],
+    ];
 
     /** 就绪标记目录（backend/storage/schema） */
     private static function cacheDir(): string
@@ -158,5 +169,60 @@ class Schema
         }
 
         self::markReady('login_attempts');
+    }
+
+    /**
+     * 确保系统预置岗位角色存在（幂等）。
+     *
+     * ★ 背景：roles 表由建库时创建、后台没有增删角色的界面，
+     *   过去新增一个岗位角色（如「实习学生」）只能手工执行 SQL，
+     *   漏做时前端「岗位角色」下拉就选不到，且各环境还不一致。
+     * ★ 只补不覆写：按「角色名 或 标识」命中即跳过，绝不改动管理员既有配置。
+     * ★ 失败不写就绪标记，下次请求会重试（避免一次偶发错误导致永久缺失）。
+     */
+    public static function ensurePresetRoles(PDO $db): void
+    {
+        if (self::$presetRolesEnsured) {
+            return;
+        }
+        self::$presetRolesEnsured = true;
+
+        if (self::isReady('preset_roles')) {
+            return;
+        }
+
+        try {
+            $db->exec("CREATE TABLE IF NOT EXISTS `roles` (
+                `id` INT NOT NULL AUTO_INCREMENT,
+                `name` VARCHAR(50) NOT NULL COMMENT '角色名称',
+                `code` VARCHAR(50) NOT NULL DEFAULT '' COMMENT '角色标识',
+                `description` VARCHAR(255) NOT NULL DEFAULT '' COMMENT '说明',
+                `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (`id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='系统角色';");
+
+            // 历史库可能缺列，补齐后再插入，避免 INSERT 直接报 Unknown column
+            self::ensureColumn($db, 'roles', 'code', "`code` VARCHAR(50) NOT NULL DEFAULT '' COMMENT '角色标识'");
+            self::ensureColumn($db, 'roles', 'description', "`description` VARCHAR(255) NOT NULL DEFAULT '' COMMENT '说明'");
+
+            foreach (self::PRESET_ROLES as $name => $meta) {
+                [$code, $desc] = $meta;
+
+                $chk = $db->prepare("SELECT COUNT(*) FROM `roles` WHERE `name` = ? OR `code` = ?");
+                $chk->execute([$name, $code]);
+                if ((int)$chk->fetchColumn() > 0) {
+                    continue;
+                }
+
+                $ins = $db->prepare("INSERT INTO `roles` (`name`, `code`, `description`) VALUES (?, ?, ?)");
+                $ins->execute([$name, $code, $desc]);
+            }
+        } catch (Throwable $e) {
+            // 忽略：无建表/写权限时角色列表仍应正常返回，下次请求再试
+            error_log('[Schema] 预置角色补齐失败: ' . $e->getMessage());
+            return;
+        }
+
+        self::markReady('preset_roles');
     }
 }

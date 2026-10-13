@@ -12,6 +12,9 @@
         </span>
       </div>
       <div class="ac-head-right">
+        <el-button v-if="canEditCart" size="small" @click="openTotal">
+          <el-icon class="mr-1"><Setting /></el-icon> 车辆总数：{{ cartTotal }}
+        </el-button>
         <el-button type="primary" size="small" @click="openReport()">
           <el-icon class="mr-1"><Plus /></el-icon> 报修
         </el-button>
@@ -53,22 +56,12 @@
       </div>
     </div>
 
-    <!-- 统计周期与规则 -->
+    <!-- 统计周期 -->
     <div class="ac-card ac-period">
       <div class="ac-period-left">
         <el-icon><Calendar /></el-icon>
         <b>统计期间：</b>{{ periodLabel }}
-        <span class="ac-period-range">（{{ periodStart }} ~ {{ periodEnd }}，每月 26 日至次月 25 日为一个统计月）</span>
-      </div>
-      <div class="ac-period-right">
-        <el-tag
-          v-for="r in rules"
-          :key="r"
-          size="small"
-          type="info"
-          effect="plain"
-          class="ac-rule-tag"
-        >{{ r }}</el-tag>
+        <span class="ac-period-range">（{{ periodStart }} ~ {{ periodEnd }}）</span>
       </div>
     </div>
 
@@ -513,8 +506,39 @@
       </template>
     </el-dialog>
 
-    <!-- 完成维修对话框 -->
-    <el-dialog v-model="finishVisible" title="完成维修" width="520px" destroy-on-close>
+    <!-- 调整车辆总数对话框（超级管理员 / 班长） -->
+    <el-dialog v-model="totalVisible" title="调整老化车总数" width="500px" destroy-on-close>
+      <el-form label-width="110px" size="small">
+        <el-form-item label="当前总数">
+          <b>{{ cartTotal }}</b> 辆
+          <span style="margin-left:8px; color:#909399; font-size:12px;">编号 001 - {{ maxCartNo }}</span>
+        </el-form-item>
+        <el-form-item label="调整为" required>
+          <el-input-number
+            v-model="totalForm.cart_total"
+            :min="1"
+            :max="999"
+            :precision="0"
+            controls-position="right"
+            style="width:160px;"
+          />
+        </el-form-item>
+        <div class="ac-tip" v-if="totalForm.cart_total < cartTotal">
+          调小后将移除编号 <b>{{ nextCartNo }}</b> 之后的车辆，列表与看板同步减少；
+          它们的历史报修记录仍保留在「报修记录」中。<br>
+          若这些车有未完成的报修/维修单，提交时会被拒绝并列出具体车号。
+        </div>
+        <div class="ac-tip" v-else-if="totalForm.cart_total > cartTotal">
+          调大后会自动补建新编号的车辆（{{ maxCartNo }} → {{ newMaxCartNo }}），新车辆默认「流动使用」。
+        </div>
+      </el-form>
+      <template #footer>
+        <el-button @click="totalVisible = false">取消</el-button>
+        <el-button type="primary" :loading="saving" @click="submitTotal">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 完成维修对话框 -->    <el-dialog v-model="finishVisible" title="完成维修" width="520px" destroy-on-close>
       <div v-if="finishRow" class="ac-finish-info">
         <div><b>{{ finishRow.cart_no }}</b> · {{ finishRow.fault_type || '未分类' }}</div>
         <div class="ac-finish-desc">{{ finishRow.fault_desc }}</div>
@@ -581,7 +605,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Tools, Plus, Refresh, Search, Download, Timer, Calendar } from '@element-plus/icons-vue';
+import { Tools, Plus, Refresh, Search, Download, Timer, Calendar, Setting } from '@element-plus/icons-vue';
 import request from '@/api/request';
 
 const activeTab = ref('records');
@@ -595,7 +619,6 @@ const faultTypes = ref([]);
 /** 这些故障类型必须填写故障现象（由后端 init 下发，当前为「其他」） */
 const descRequiredTypes = ref([]);
 const usageTypes = ref(['固定使用', '流动使用']);
-const rules = ref([]);
 const canManage = ref(false);
 /** 档案维护权限：仅超级管理员 + 班长（由后端下发，前端只做按钮级隐藏） */
 const canEditCart = ref(false);
@@ -801,8 +824,6 @@ async function loadInit() {
     if (Array.isArray(d.usage_types) && d.usage_types.length) {
       usageTypes.value = d.usage_types;
     }
-    rules.value = d.rules || [];
-    canManage.value = !!d.can_manage;
     if (typeof d.can_edit_cart === 'boolean') {
       canEditCart.value = d.can_edit_cart;
     }
@@ -869,7 +890,9 @@ async function loadCarts() {
     if (typeof d.can_edit_cart === 'boolean') {
       canEditCart.value = d.can_edit_cart;
     }
-    if (carts.value.length) {
+    // ★ 不在这里用列表行数回写 cartTotal：总数是配置项（aging_settings），
+    //   由 init/set_cart_total 下发。若按行数回写，脏数据或请求竞态会让总数显示不可靠。
+    if (carts.value.length && cartTotal.value < carts.value.length) {
       cartTotal.value = carts.value.length;
     }
     // 列表数据被整体替换后，旧的编辑行引用失效，直接退出编辑态
@@ -979,6 +1002,72 @@ async function submitReport() {
     });
     ElMessage.success('报修成功');
     reportVisible.value = false;
+    refreshAll();
+  } catch (e) {
+    /* 拦截器已提示 */
+  } finally {
+    saving.value = false;
+  }
+}
+
+// ---------- 调整车辆总数（超级管理员 / 班长） ----------
+
+const totalVisible = ref(false);
+const totalForm = reactive({ cart_total: 140 });
+
+/** 调小后第一个被移除的编号（用于提示影响范围） */
+const nextCartNo = computed(() => {
+  const n = Number(totalForm.cart_total) || 0;
+  if (n < 1 || n >= cartTotal.value) return '';
+  return String(n + 1).padStart(3, '0');
+});
+
+const newMaxCartNo = computed(() => {
+  const n = Number(totalForm.cart_total) || 0;
+  return n > 0 ? String(n).padStart(3, '0') : '-';
+});
+
+function openTotal() {
+  totalForm.cart_total = cartTotal.value;
+  totalVisible.value = true;
+}
+
+async function submitTotal() {
+  const n = Number(totalForm.cart_total) || 0;
+  if (n < 1 || n > 999) {
+    ElMessage.warning('老化车总数应在 1 ~ 999 之间');
+    return;
+  }
+  if (n === cartTotal.value) {
+    ElMessage.info('总数未变化');
+    totalVisible.value = false;
+    return;
+  }
+
+  // 调小是「移除车辆」的破坏性操作，二次确认并明确列出影响范围
+  if (n < cartTotal.value) {
+    try {
+      await ElMessageBox.confirm(
+        `确认把老化车总数从 ${cartTotal.value} 辆调整为 ${n} 辆？\n\n`
+        + `编号 ${String(n + 1).padStart(3, '0')} - ${maxCartNo.value} 的车辆将从列表和看板中移除。\n`
+        + '它们的历史报修记录仍会保留在「报修记录」中。',
+        '调整总数确认',
+        { type: 'warning', confirmButtonText: '确认调整', cancelButtonText: '取消' }
+      );
+    } catch (e) {
+      return;
+    }
+  }
+
+  saving.value = true;
+  try {
+    const res = await request.post('/aging_cart/set_cart_total', { cart_total: n });
+    const d = (res && res.data) || {};
+    if (d.cart_total) {
+      cartTotal.value = d.cart_total;
+    }
+    ElMessage.success(`老化车总数已更新为 ${cartTotal.value} 辆`);
+    totalVisible.value = false;
     refreshAll();
   } catch (e) {
     /* 拦截器已提示 */
@@ -1223,16 +1312,6 @@ onBeforeUnmount(() => {
 
 .ac-period-range {
   color: #909399;
-}
-
-.ac-period-right {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.ac-rule-tag {
-  max-width: 100%;
 }
 
 .ac-tabs {

@@ -35,8 +35,12 @@ class AgingCartController
     /** 模块代码：需与 modules 表登记一致，用于模块权限与审计 */
     private const MODULE = 'aging_cart';
 
-    /** 老化车总数（编号 001~140） */
-    private const CART_TOTAL = 140;
+    /**
+     * 默认老化车总数（首次初始化时写入配置表）。
+     * ★ 实际总数以 `aging_settings.cart_total` 为准，不再用这个常量直接参与业务逻辑：
+     *   车辆转走/减少时，管理员在页面上把总数调小即可，列表与看板会随之变化。
+     */
+    private const DEFAULT_CART_TOTAL = 140;
 
     /**
      * 故障类型预设（按需求固定 4 项，顺序即下拉顺序）。
@@ -133,9 +137,21 @@ class AgingCartController
     {
         try {
             // 注意：DDL 会隐式提交事务，必须在任何 beginTransaction() 之前执行
+
+            // 模块配置（单行表，id 固定为 1）。车辆总数放这里，改一处即可全局生效。
+            $this->db->exec("CREATE TABLE IF NOT EXISTS `aging_settings` (
+                `id` TINYINT NOT NULL,
+                `cart_total` SMALLINT UNSIGNED NOT NULL DEFAULT 140 COMMENT '老化车总数',
+                `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                PRIMARY KEY (`id`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='老化车模块配置';");
+            $this->db->exec(
+                "INSERT IGNORE INTO `aging_settings` (`id`, `cart_total`) VALUES (1, " . self::DEFAULT_CART_TOTAL . ")"
+            );
+
             $this->db->exec("CREATE TABLE IF NOT EXISTS `aging_carts` (
                 `id` INT NOT NULL AUTO_INCREMENT,
-                `cart_no` VARCHAR(10) NOT NULL COMMENT '老化车编号，001-140',
+                `cart_no` VARCHAR(10) NOT NULL COMMENT '老化车编号，001-NNN',
                 `status` VARCHAR(20) NOT NULL DEFAULT 'normal' COMMENT 'normal正常/pending待维修/repairing维修中/fault管理员标记故障',
                 `layers` TINYINT UNSIGNED NULL DEFAULT NULL COMMENT '层数',
                 `usage_type` VARCHAR(20) NOT NULL DEFAULT '流动使用' COMMENT '使用位置：固定使用/流动使用',
@@ -179,20 +195,42 @@ class AgingCartController
             Schema::ensureColumn($this->db, 'aging_carts', 'usage_type',
                 "`usage_type` VARCHAR(20) NOT NULL DEFAULT '流动使用' COMMENT '使用位置：固定使用/流动使用' AFTER `layers`");
 
-            $this->initCarts();
+            $this->initCarts($this->cartTotal());
         } catch (Throwable $e) {
             error_log('[AgingCart] 表结构初始化失败: ' . $e->getMessage());
         }
     }
 
-    /** 初始化 001~140 台账（幂等：INSERT IGNORE + 唯一键） */
-    private function initCarts(): void
+    // ============================================================
+    //  车辆总数配置
+    // ============================================================
+
+    /**
+     * 当前老化车总数（以 aging_settings 为准）。
+     * 读不到时退回 DEFAULT_CART_TOTAL —— 与历史行为一致，不会因配置表异常导致模块不可用。
+     */
+    private function cartTotal(): int
+    {
+        try {
+            $v = $this->db->query("SELECT `cart_total` FROM `aging_settings` WHERE `id` = 1")->fetchColumn();
+            $n = (int)$v;
+            if ($n >= 1 && $n <= 999) {
+                return $n;
+            }
+        } catch (Throwable $e) {
+            error_log('[AgingCart] 读取老化车总数失败: ' . $e->getMessage());
+        }
+        return self::DEFAULT_CART_TOTAL;
+    }
+
+    /** 初始化 / 补齐台账到 $total 辆（幂等：INSERT IGNORE + 唯一键） */
+    private function initCarts(int $total): void
     {
         try {
             $stmt = $this->db->prepare(
                 "INSERT IGNORE INTO `aging_carts` (`cart_no`, `status`, `usage_type`) VALUES (?, 'normal', ?)"
             );
-            for ($i = 1; $i <= self::CART_TOTAL; $i++) {
+            for ($i = 1; $i <= $total; $i++) {
                 $stmt->execute([sprintf('%03d', $i), self::DEFAULT_USAGE]);
             }
         } catch (Throwable $e) {
@@ -227,7 +265,7 @@ class AgingCartController
                     ['value' => self::STATUS_NORMAL, 'label' => '正常'],
                     ['value' => self::STATUS_FAULT,  'label' => '故障'],
                 ],
-                'cart_total'  => self::CART_TOTAL,
+                'cart_total'  => $this->cartTotal(),
                 'is_admin'    => $this->isAdmin,
                 'can_manage'  => $this->canManage,
                 // 档案维护（列表页改层数/状态/使用位置/备注）仅超管 + 班长
@@ -305,7 +343,8 @@ class AgingCartController
 
             $pendingCount = (int)$this->db->query("SELECT COUNT(*) FROM `aging_repairs` WHERE status = 'pending'")->fetchColumn();
             $repairingCount = (int)$this->db->query("SELECT COUNT(*) FROM `aging_repairs` WHERE status = 'repairing'")->fetchColumn();
-            $normalCarts = self::CART_TOTAL - $needRepair;
+            $cartTotal = $this->cartTotal();
+            $normalCarts = $cartTotal - $needRepair;
 
             // 本月报修：按报修时间落在统计区间
             $st = $this->db->prepare("SELECT COUNT(DISTINCT cart_no) FROM `aging_repairs` WHERE reported_at >= ? AND reported_at <= ?");
@@ -377,7 +416,7 @@ class AgingCartController
 
             Response::success('success', [
                 'period'            => $period,
-                'cart_total'        => self::CART_TOTAL,
+                'cart_total'        => $cartTotal,
                 'need_repair'       => $needRepair,
                 'manual_fault'      => $manualFault,
                 'pending_count'     => $pendingCount,
@@ -601,7 +640,7 @@ class AgingCartController
             $chk = $this->db->prepare("SELECT id FROM `aging_carts` WHERE cart_no = ? LIMIT 1");
             $chk->execute([$cartNo]);
             if (!$chk->fetchColumn()) {
-                Response::error('老化车编号不存在，应为 001-' . sprintf('%03d', self::CART_TOTAL));
+                Response::error('老化车编号不存在，应为 001-' . sprintf('%03d', $this->cartTotal()));
                 return;
             }
 
@@ -636,6 +675,84 @@ class AgingCartController
                 $this->db->rollBack();
             }
             Response::exception($e, '报修失败');
+        }
+    }
+
+    /**
+     * 调整老化车总数（仅超级管理员 / 班长）
+     *
+     * 调大：自动补建新增编号的车辆（如 131 → 141）
+     * 调小：移除编号大于总数的车辆，其历史报修记录保留在 aging_repairs 中
+     *
+     * ⚠️ 调小的前提：被移除的车辆不能有未完成的报修/维修单，
+     *    否则会出现「车辆已不在册但报修单还开着」的脏数据。
+     */
+    public function setCartTotal(): void
+    {
+        if (!$this->canEditCart) {
+            Response::error('权限不足：只有超级管理员和班长可以调整老化车总数。', [], 403);
+            return;
+        }
+
+        try {
+            $input = $this->input();
+            $total = (int)($input['cart_total'] ?? 0);
+            if ($total < 1 || $total > 999) {
+                Response::error('老化车总数应在 1 ~ 999 之间');
+                return;
+            }
+
+            $old = $this->cartTotal();
+            if ($total === $old) {
+                Response::success('总数未变化', ['cart_total' => $total]);
+                return;
+            }
+
+            if ($total < $old) {
+                $maxNo = sprintf('%03d', $total);
+                $st = $this->db->prepare(
+                    "SELECT GROUP_CONCAT(DISTINCT cart_no ORDER BY cart_no SEPARATOR ', ')
+                     FROM `aging_repairs`
+                     WHERE status IN ('pending', 'repairing') AND cart_no > ?"
+                );
+                $st->execute([$maxNo]);
+                $busy = trim((string)$st->fetchColumn());
+                if ($busy !== '') {
+                    Response::error(
+                        '以下老化车有未完成的报修/维修记录，请先完成或删除后再调整总数：' . $busy
+                    );
+                    return;
+                }
+            }
+
+            $this->db->beginTransaction();
+
+            $upd = $this->db->prepare(
+                "INSERT INTO `aging_settings` (`id`, `cart_total`) VALUES (1, ?)
+                 ON DUPLICATE KEY UPDATE `cart_total` = VALUES(`cart_total`)"
+            );
+            $upd->execute([$total]);
+
+            if ($total < $old) {
+                $del = $this->db->prepare("DELETE FROM `aging_carts` WHERE cart_no > ?");
+                $del->execute([sprintf('%03d', $total)]);
+            } else {
+                $this->initCarts($total);
+            }
+
+            $this->db->commit();
+
+            AuditService::log('老化车维修', '调整老化车总数 ' . $old . ' -> ' . $total);
+
+            Response::success('老化车总数已更新为 ' . $total, [
+                'cart_total' => $total,
+                'removed'    => $total < $old,
+            ]);
+        } catch (Throwable $e) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            Response::exception($e, '调整老化车总数失败');
         }
     }
 
@@ -928,7 +1045,7 @@ class AgingCartController
             $chk = $this->db->prepare("SELECT id FROM `aging_carts` WHERE cart_no = ? LIMIT 1");
             $chk->execute([$cartNo]);
             if (!$chk->fetchColumn()) {
-                Response::error('老化车编号不存在，应为 001-' . sprintf('%03d', self::CART_TOTAL));
+                Response::error('老化车编号不存在，应为 001-' . sprintf('%03d', $this->cartTotal()));
                 return;
             }
 

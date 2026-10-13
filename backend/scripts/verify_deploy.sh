@@ -392,10 +392,18 @@ else
 fi
 AC_ROUTES=$(grep -c "/api/aging_cart/" "$B/public/index.php" 2>/dev/null | tr -d ' ')
 AC_MW=$(grep -c "aging_cart'\]\]" "$B/public/index.php" 2>/dev/null | tr -d ' ')
-if [ "${AC_ROUTES:-0}" -ge 11 ] && [ "${AC_MW:-0}" -ge 11 ]; then
+if [ "${AC_ROUTES:-0}" -ge 12 ] && [ "${AC_MW:-0}" -ge 12 ]; then
     echo "  [OK]     /api/aging_cart/* 路由 ${AC_ROUTES} 条，中间件均为双层方括号"; pass=$((pass+1))
 else
-    echo "  [缺失]   aging_cart 路由不全（路由 ${AC_ROUTES:-0} 条 / 双层方括号 ${AC_MW:-0} 处，期望均 ≥11）"; fail=$((fail+1))
+    echo "  [缺失]   aging_cart 路由不全（路由 ${AC_ROUTES:-0} 条 / 双层方括号 ${AC_MW:-0} 处，期望均 ≥12）"; fail=$((fail+1))
+fi
+# 车辆总数配置：调总数接口 + 配置表 + 台账按配置同步
+if grep -q "/api/aging_cart/set_cart_total" "$B/public/index.php" 2>/dev/null \
+   && grep -q "function setCartTotal" "$B/app/Controllers/AgingCartController.php" 2>/dev/null \
+   && grep -q "aging_settings" "$B/app/Controllers/AgingCartController.php" 2>/dev/null; then
+    echo "  [OK]     车辆总数可配置（aging_settings + set_cart_total）"; pass=$((pass+1))
+else
+    echo "  [缺失]   车辆总数仍为硬编码，无法调整（期望 aging_settings + set_cart_total）"; fail=$((fail+1))
 fi
 # 车辆档案（层数/使用位置/状态/备注）维护接口
 if grep -q "/api/aging_cart/save_cart" "$B/public/index.php" 2>/dev/null \
@@ -461,6 +469,13 @@ if grep -q "v-for=\"c in carts\"" "$F/src/views/aging_cart/Index.vue" 2>/dev/nul
 else
     echo "  [缺失]   看板与列表未共享数据，改动不会联动"; fail=$((fail+1))
 fi
+# 统计规则说明已按需求从页面取消
+if ! grep -q "v-for=\"r in rules\"" "$F/src/views/aging_cart/Index.vue" 2>/dev/null \
+   && ! grep -q "每月 26 日至次月 25 日为一个统计月" "$F/src/views/aging_cart/Index.vue" 2>/dev/null; then
+    echo "  [OK]     统计规则说明已从页面取消"; pass=$((pass+1))
+else
+    echo "  [缺失]   统计规则说明仍在页面展示（需求要求取消）"; fail=$((fail+1))
+fi
 if [ -f "$F/src/views/aging_cart/Index.vue" ]; then
     echo "  [OK]     前端视图 views/aging_cart/Index.vue 存在"; pass=$((pass+1))
 else
@@ -489,6 +504,34 @@ else
     echo "  [警告]   图标渲染缺兜底，新增图标漏登记时会显示空白"; warn=$((warn+1))
 fi
 echo "  [提示]   模块登记需执行一次 SQL：tools/老化车模块初始化.sql（否则普通用户看不到菜单）"
+
+echo ""
+echo "── 十九、岗位角色预设（实习学生）──"
+# roles 表没有后台增删界面，新增角色靠「代码内预置 + 幂等补齐」，
+# 前端「岗位角色」下拉直接读 /api/system/roles，因此后端到位即生效。
+if grep -q "ensurePresetRoles" "$B/app/Core/Schema.php" 2>/dev/null \
+   && grep -q "实习学生" "$B/app/Core/Schema.php" 2>/dev/null \
+   && grep -q "PRESET_ROLES" "$B/app/Core/Schema.php" 2>/dev/null; then
+    echo "  [OK]     Schema 已预置岗位角色（含实习学生）"; pass=$((pass+1))
+else
+    echo "  [缺失]   Schema 未预置「实习学生」角色（前端岗位角色下拉将选不到）"; fail=$((fail+1))
+fi
+if grep -q "Schema::ensurePresetRoles" "$B/app/Controllers/SystemController.php" 2>/dev/null; then
+    echo "  [OK]     角色列表接口已接入自动补齐（访问即生效，无需手工 SQL）"; pass=$((pass+1))
+else
+    echo "  [缺失]   SystemController::roles() 未调用 ensurePresetRoles → 需手工执行 tools/新增实习学生角色.sql"; fail=$((fail+1))
+fi
+if [ -f "$BASE/tools/新增实习学生角色.sql" ]; then
+    echo "  [OK]     手工兜底 SQL 存在：tools/新增实习学生角色.sql"; pass=$((pass+1))
+else
+    echo "  [警告]   缺少手工兜底 SQL：tools/新增实习学生角色.sql（无权限自动补列时用）"; warn=$((warn+1))
+fi
+# 前端角色徽章需对「学生」有独立配色，否则和普通员工混在一起不易辨认
+if grep -q "学生" "$F/src/views/system/Users.vue" 2>/dev/null; then
+    echo "  [OK]     用户管理页角色徽章已区分「学生」配色"; pass=$((pass+1))
+else
+    echo "  [警告]   Users.vue 角色徽章未区分学生角色，显示上不易识别"; warn=$((warn+1))
+fi
 
 echo ""
 echo "=================================================="

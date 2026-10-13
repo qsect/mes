@@ -44,6 +44,8 @@ Thumbs.db
 *.tmp
 *.bak
 *.swp
+# Vite 加载 vite.config.js 时生成的临时文件，构建结束后偶尔残留
+frontend/vite.config.js.timestamp-*.mjs
 
 # ===== AI 工具目录（工作记忆，非项目源码）=====
 .workbuddy/
