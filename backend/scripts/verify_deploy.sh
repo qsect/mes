@@ -424,18 +424,33 @@ else
 fi
 # ★ 档案维护权限必须锁定为「超级管理员 / 班长」，
 #   绝不能退化成 ModulePerm::canEdit（那会让任何被勾选 can_edit 的人都能改档案）。
+#
+# ⚠️ 断言必须限定在 saveCart() 方法体内：save()/delete()（维修记录改删）用 canManage
+#    是有意的，两者口径不同。若写成全文件的 `! grep canManage` 会恒为假、永远报缺失
+#    （2026-10-13 实测踩坑，这里保留注释以免后人再犯）。
+AC_SAVE=$(awk '/public function saveCart/,/^    }$/' "$B/app/Controllers/AgingCartController.php" 2>/dev/null)
 if [ -f "$B/app/Core/UserRole.php" ] \
    && grep -q "UserRole::canMaintain" "$B/app/Controllers/AgingCartController.php" 2>/dev/null \
-   && grep -q "canEditCart" "$B/app/Controllers/AgingCartController.php" 2>/dev/null \
-   && ! grep -q "if (!\$this->canManage)" "$B/app/Controllers/AgingCartController.php" 2>/dev/null; then
-    echo "  [OK]     档案维护权限已限定为超级管理员/班长"; pass=$((pass+1))
+   && printf '%s\n' "$AC_SAVE" | grep -q "canEditCart" \
+   && ! printf '%s\n' "$AC_SAVE" | grep -q "canManage"; then
+    echo "  [OK]     档案维护权限已限定为超级管理员/班长（saveCart 独立鉴权）"; pass=$((pass+1))
 else
-    echo "  [缺失]   档案维护权限未正确限定（应为 UserRole::canMaintain，而非 canManage）"; fail=$((fail+1))
+    echo "  [缺失]   档案维护权限未正确限定（saveCart 应为 canEditCart，而非 canManage）"; fail=$((fail+1))
 fi
-# 列表默认只读：只有处于编辑态的行才渲染输入控件
+# 权限字段名前后端必须一致（防漂移）：后端下发 can_edit_cart，前端按同名接收
+if grep -q "can_edit_cart" "$B/app/Controllers/AgingCartController.php" 2>/dev/null \
+   && grep -q "can_edit_cart" "$F/src/views/aging_cart/Index.vue" 2>/dev/null; then
+    echo "  [OK]     can_edit_cart 前后端字段一致"; pass=$((pass+1))
+else
+    echo "  [缺失]   can_edit_cart 下发或接收不一致"; fail=$((fail+1))
+fi
+# 列表默认只读：单元格只在「编辑态」渲染输入控件；操作列提供 编辑 / 保存 / 取消
+# ⚠️ 同样只用正向断言 —— 视图里 records 页签仍保留 canManage 用于维修记录改删，是预期行为。
 if grep -q "isEditing(row)" "$F/src/views/aging_cart/Index.vue" 2>/dev/null \
-   && ! grep -q "v-if=\"canManage\"" "$F/src/views/aging_cart/Index.vue" 2>/dev/null; then
-    echo "  [OK]     列表默认只读（仅编辑态渲染输入控件）"; pass=$((pass+1))
+   && grep -q "function beginEditCart" "$F/src/views/aging_cart/Index.vue" 2>/dev/null \
+   && grep -q "function saveEditCart" "$F/src/views/aging_cart/Index.vue" 2>/dev/null \
+   && grep -q "function cancelEditCart" "$F/src/views/aging_cart/Index.vue" 2>/dev/null; then
+    echo "  [OK]     列表默认只读（编辑态才渲染输入控件，含 编辑/保存/取消）"; pass=$((pass+1))
 else
     echo "  [缺失]   列表未实现「默认只读 + 点击编辑」"; fail=$((fail+1))
 fi
