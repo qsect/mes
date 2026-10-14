@@ -613,6 +613,10 @@ $router->add("GET",  "/api/aging_cart/carts",     [\App\Controllers\AgingCartCon
 $router->add("GET",  "/api/aging_cart/list",      [\App\Controllers\AgingCartController::class, "list"],      [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
 $router->add("POST", "/api/aging_cart/report",    [\App\Controllers\AgingCartController::class, "report"],    [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
 $router->add("POST", "/api/aging_cart/start",     [\App\Controllers\AgingCartController::class, "start"],     [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
+// 多人同时参与同一张工单：各自独立计时
+$router->add("POST", "/api/aging_cart/join",      [\App\Controllers\AgingCartController::class, "join"],      [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
+// 本人收工（不结束整张工单）
+$router->add("POST", "/api/aging_cart/leave",     [\App\Controllers\AgingCartController::class, "leave"],     [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
 $router->add("POST", "/api/aging_cart/finish",    [\App\Controllers\AgingCartController::class, "finish"],    [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
 $router->add("POST", "/api/aging_cart/save",      [\App\Controllers\AgingCartController::class, "save"],      [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);
 $router->add("POST", "/api/aging_cart/save_cart", [\App\Controllers\AgingCartController::class, "saveCart"],  [['App\\Middlewares\\ModuleViewMiddleware', 'aging_cart']]);

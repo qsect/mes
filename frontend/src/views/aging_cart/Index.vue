@@ -51,8 +51,21 @@
       </div>
       <div class="ac-stat" style="border-left-color:#909399;">
         <div class="ac-stat-value" style="color:#606266;">{{ board.month_avg_text || '0 分钟' }}</div>
-        <div class="ac-stat-label">本月平均维修时长</div>
-        <div class="ac-stat-sub">累计 {{ board.month_minutes_text || '0 分钟' }}</div>
+        <div class="ac-stat-label">本月平均修复跨度</div>
+        <div class="ac-stat-sub">跨度累计 {{ board.month_minutes_text || '0 分钟' }}</div>
+      </div>
+      <div class="ac-stat" style="border-left-color:#722ed1;">
+        <div class="ac-stat-value" style="color:#722ed1;">{{ board.month_work_text || '0 分钟' }}</div>
+        <div class="ac-stat-label">本月投入工时（人力）</div>
+        <div class="ac-stat-sub">
+          多人协作 {{ board.month_collab || 0 }} 单
+          <el-tooltip
+            content="投入工时 = 各维修人有效时长之和（多人重叠各计各的）；修复跨度 = 从开工到收工的自然经过"
+            placement="top"
+          >
+            <el-icon style="color:#909399;"><QuestionFilled /></el-icon>
+          </el-tooltip>
+        </div>
       </div>
     </div>
 
@@ -151,20 +164,50 @@
             </el-table-column>
             <el-table-column prop="reporter_name" label="报修人" width="100" show-overflow-tooltip />
             <el-table-column prop="reported_at" label="报修时间" width="150" />
-            <el-table-column prop="repairer_name" label="维修人" width="100" show-overflow-tooltip>
+            <el-table-column label="参与维修人" min-width="210">
               <template #default="{ row }">
-                <span>{{ row.repairer_name || '-' }}</span>
+                <div v-if="row.workers && row.workers.length" class="ac-workers">
+                  <el-tooltip
+                    v-for="w in row.workers"
+                    :key="w.worker_id"
+                    placement="top"
+                    :content="`${w.user_name}：${w.joined_at} 加入${w.left_at ? '，' + w.left_at + ' 离开' : '（仍在维修）'}`"
+                  >
+                    <span class="ac-worker" :class="w.working ? 'ac-worker-on' : ''">
+                      <el-icon class="ac-worker-ico"><User /></el-icon>
+                      <span class="ac-worker-name">{{ w.user_name }}</span>
+                      <b class="ac-worker-time">{{ w.duration_text }}</b>
+                      <span v-if="w.is_starter" class="ac-worker-star">开工</span>
+                    </span>
+                  </el-tooltip>
+                  <el-tag v-if="row.is_multi_worker" size="small" type="warning" effect="plain">
+                    {{ row.worker_count }}人协作
+                  </el-tag>
+                  <span v-if="row.status === 'repairing' && row.active_worker_count === 0" class="ac-worker-idle">
+                    当前无人维修
+                  </span>
+                </div>
+                <span v-else style="color:#c0c4cc;">-</span>
               </template>
             </el-table-column>
-            <el-table-column label="维修时长" width="150">
+            <el-table-column label="维修时长" width="200">
               <template #default="{ row }">
-                <span v-if="row.status === 'repairing'" style="color:#409EFF; font-weight:600;">
-                  <el-icon><Timer /></el-icon> 已用 {{ row.elapsed_text }}
-                </span>
-                <span v-else-if="row.status === 'done'">
-                  <b>{{ row.duration_text }}</b>
-                  <span class="ac-raw">(自然 {{ row.raw_text }})</span>
-                </span>
+                <template v-if="row.status === 'repairing'">
+                  <div style="color:#409EFF; font-weight:600;">
+                    <el-icon><Timer /></el-icon> 跨度 {{ row.elapsed_text }}
+                  </div>
+                  <div class="ac-raw">
+                    投入 {{ row.work_text }}
+                    <span v-if="row.is_multi_worker">（{{ row.worker_count }}人合计）</span>
+                  </div>
+                </template>
+                <template v-else-if="row.status === 'done'">
+                  <div><b>{{ row.duration_text }}</b> <span class="ac-raw">跨度</span></div>
+                  <div class="ac-raw">
+                    投入 {{ row.work_text }}
+                    <span v-if="row.is_multi_worker">（{{ row.worker_count }}人合计）</span>
+                  </div>
+                </template>
                 <span v-else style="color:#c0c4cc;">-</span>
               </template>
             </el-table-column>
@@ -173,22 +216,31 @@
                 <span>{{ row.repair_remark || '-' }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="操作" width="170" fixed="right" align="center">
+            <el-table-column label="操作" width="230" fixed="right" align="center">
               <template #default="{ row }">
                 <el-button
                   v-if="row.status === 'pending'"
                   type="primary"
                   size="small"
                   link
-                  @click="startRepair(row)"
+                  @click="joinRepair(row)"
                 >开始维修</el-button>
-                <el-button
-                  v-if="row.status === 'repairing'"
-                  type="success"
-                  size="small"
-                  link
-                  @click="openFinish(row)"
-                >完成</el-button>
+                <template v-else-if="row.status === 'repairing'">
+                  <el-button
+                    v-if="!row.me_joined"
+                    type="primary"
+                    size="small"
+                    link
+                    @click="joinRepair(row)"
+                  >参与维修</el-button>
+                  <el-button
+                    v-else
+                    size="small"
+                    link
+                    @click="leaveRepair(row)"
+                  >我已完成</el-button>
+                  <el-button type="success" size="small" link @click="openFinish(row)">收工</el-button>
+                </template>
                 <template v-if="canManage">
                   <el-button size="small" link @click="openEdit(row)">编辑</el-button>
                   <el-button type="danger" size="small" link @click="removeRecord(row)">删除</el-button>
@@ -428,8 +480,20 @@
                 <template #default="{ row }"><b>{{ row.cart_no }}</b></template>
               </el-table-column>
               <el-table-column prop="fault_desc" label="故障现象" min-width="150" show-overflow-tooltip />
-              <el-table-column prop="repairer_name" label="维修人" width="90" show-overflow-tooltip />
-              <el-table-column prop="duration_text" label="有效时长" width="120" />
+              <el-table-column label="维修人" width="130" show-overflow-tooltip>
+                <template #default="{ row }">
+                  {{ row.worker_names || row.repairer_name || '-' }}
+                  <el-tag v-if="row.is_multi_worker" size="small" type="warning" effect="plain">
+                    {{ row.worker_count }}人
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="duration_text" label="修复跨度" width="110" />
+              <el-table-column label="投入工时" width="110">
+                <template #default="{ row }">
+                  <b>{{ row.work_text || '-' }}</b>
+                </template>
+              </el-table-column>
               <el-table-column prop="repair_finished_at" label="完成时间" width="150" />
             </el-table>
           </div>
@@ -538,14 +602,49 @@
       </template>
     </el-dialog>
 
-    <!-- 完成维修对话框 -->    <el-dialog v-model="finishVisible" title="完成维修" width="520px" destroy-on-close>
+    <!-- 完成维修（收工）对话框 -->
+    <el-dialog v-model="finishVisible" title="完成维修（收工）" width="600px" destroy-on-close>
       <div v-if="finishRow" class="ac-finish-info">
         <div><b>{{ finishRow.cart_no }}</b> · {{ finishRow.fault_type || '未分类' }}</div>
         <div class="ac-finish-desc">{{ finishRow.fault_desc }}</div>
         <div class="ac-finish-time">
           开始：{{ finishRow.repair_started_at }}
           <el-divider direction="vertical" />
-          已用时：<b style="color:#409EFF;">{{ finishRow.elapsed_text || '计算中' }}</b>
+          跨度：<b style="color:#409EFF;">{{ finishRow.elapsed_text || '计算中' }}</b>
+        </div>
+
+        <!-- 参与人结算：收工会一并结束所有仍在修的人的计时 -->
+        <div class="ac-finish-workers">
+          <div class="ac-finish-workers-title">
+            参与维修人员
+            <el-tag v-if="finishRow.is_multi_worker" size="small" type="warning" effect="plain">
+              多人协作 {{ finishRow.worker_count }} 人
+            </el-tag>
+          </div>
+          <el-table v-if="finishRow.workers && finishRow.workers.length" :data="finishRow.workers" size="small" border>
+            <el-table-column label="维修人" min-width="90">
+              <template #default="{ row }">
+                {{ row.user_name }}
+                <span v-if="row.is_starter" class="ac-worker-star">开工</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="joined_at" label="加入时间" width="150" />
+            <el-table-column label="状态" width="90" align="center">
+              <template #default="{ row }">
+                <el-tag :type="row.working ? 'success' : 'info'" size="small">
+                  {{ row.working ? '在修中' : '已离开' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="个人工时" width="110" align="right">
+              <template #default="{ row }"><b>{{ row.duration_text }}</b></template>
+            </el-table-column>
+          </el-table>
+          <div v-else style="color:#909399; font-size:12px;">暂无参与人记录</div>
+          <div class="ac-finish-sum">
+            投入工时合计：<b>{{ finishRow.work_text }}</b>
+            <span class="ac-raw">（修复跨度 {{ finishRow.elapsed_text }}，重叠部分各计各的）</span>
+          </div>
         </div>
       </div>
       <el-form label-width="100px" size="small" style="margin-top:10px;">
@@ -560,10 +659,12 @@
           />
         </el-form-item>
       </el-form>
-      <div class="ac-tip">提交后系统按规则自动扣除不计入的时段，生成有效维修时长。</div>
+      <div class="ac-tip">
+        收工后系统会按规则扣除不计入的时段；仍在维修的人员一并结束计时，工单转为已修复、车辆状态恢复为正常。
+      </div>
       <template #footer>
         <el-button @click="finishVisible = false">取消</el-button>
-        <el-button type="success" :loading="saving" @click="submitFinish">确认完成</el-button>
+        <el-button type="success" :loading="saving" @click="submitFinish">确认收工</el-button>
       </template>
     </el-dialog>
 
@@ -605,7 +706,7 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Tools, Plus, Refresh, Search, Download, Timer, Calendar, Setting } from '@element-plus/icons-vue';
+import { Tools, Plus, Refresh, Search, Download, Timer, Calendar, Setting, User, QuestionFilled } from '@element-plus/icons-vue';
 import request from '@/api/request';
 
 const activeTab = ref('records');
@@ -1076,21 +1177,53 @@ async function submitTotal() {
   }
 }
 
-// ---------- 开始维修 ----------
+// ---------- 参与维修（多人同时维修）----------
 
-async function startRepair(row) {
+/**
+ * 加入维修。
+ * - 工单待维修 → 本人是开工者，开始计工单跨度；
+ * - 工单维修中 → 本人是协作人，从第 2 人起即为多人同时维修，各计各的工时；
+ * - 已在参与中 → 后端幂等返回成功，防连点产生重复计时。
+ */
+async function joinRepair(row) {
+  const isStart = row.status === 'pending';
+  const title = isStart ? '开始维修' : '参与维修';
   try {
     await ElMessageBox.confirm(
-      `确认开始维修 ${row.cart_no}？计时将立即开始。`,
-      '开始维修',
-      { type: 'warning', confirmButtonText: '开始', cancelButtonText: '取消' }
+      isStart
+        ? `确认开始维修 ${row.cart_no}？计时将立即开始。`
+        : `确认参与维修 ${row.cart_no}？\n\n当前已有 ${row.active_worker_count || 0} 人在维修，你的工时将独立计时，互不影响。`,
+      title,
+      { type: 'warning', confirmButtonText: isStart ? '开始' : '加入', cancelButtonText: '取消' }
     );
   } catch (e) {
     return;
   }
   try {
-    await request.post('/aging_cart/start', { id: row.id });
-    ElMessage.success('已开始维修');
+    const res = await request.post('/aging_cart/join', { id: row.id });
+    const d = (res && res.data) || {};
+    ElMessage.success(d.is_starter ? '已开始维修，计时开始' : '已加入维修，你的工时独立计算');
+    refreshAll();
+  } catch (e) {
+    /* 拦截器已提示 */
+  }
+}
+
+/** 本人收工：只结束自己的计时，工单继续，其他人的计时不受影响 */
+async function leaveRepair(row) {
+  try {
+    await ElMessageBox.confirm(
+      `确认结束你在 ${row.cart_no} 上的维修计时吗？\n\n工单不会关闭，其他人仍在维修时可继续。`,
+      '我的维修已完成',
+      { type: 'warning', confirmButtonText: '完成我的部分', cancelButtonText: '取消' }
+    );
+  } catch (e) {
+    return;
+  }
+  try {
+    const res = await request.post('/aging_cart/leave', { id: row.id });
+    const d = (res && res.data) || {};
+    ElMessage.success(`你的维修计时已结束：${d.duration_text || '-'}`);
     refreshAll();
   } catch (e) {
     /* 拦截器已提示 */
@@ -1118,7 +1251,12 @@ async function submitFinish() {
       repair_remark: finishForm.repair_remark.trim()
     });
     const d = (res && res.data) || {};
-    ElMessage.success(`维修完成，有效时长 ${d.duration_text || '-'}`);
+    const who = Array.isArray(d.workers) ? d.workers.length : 0;
+    ElMessage.success(
+      who > 1
+        ? `收工完成：修复跨度 ${d.duration_text || '-'}，${who} 人投入工时合计 ${d.work_text || '-'}`
+        : `维修完成，有效时长 ${d.duration_text || '-'}`
+    );
     finishVisible.value = false;
     refreshAll();
   } catch (e) {
@@ -1491,6 +1629,79 @@ onBeforeUnmount(() => {
   font-size: 12px;
   color: #909399;
   margin-top: 6px;
+}
+
+/* ===== 多人协作：参与人标签 ===== */
+.ac-workers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.ac-worker {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border: 1px solid #dcdfe6;
+  border-radius: 3px;
+  background: #fff;
+  font-size: 12px;
+  color: #606266;
+  white-space: nowrap;
+}
+
+.ac-worker-on {
+  border-color: #b3d8ff;
+  background: #ecf5ff;
+  color: #409eff;
+}
+
+.ac-worker-ico {
+  font-size: 11px;
+  color: #909399;
+}
+
+.ac-worker-time {
+  color: #303133;
+  font-weight: 600;
+}
+
+.ac-worker-star {
+  padding: 0 3px;
+  border-radius: 2px;
+  background: #fdf6ec;
+  color: #e6a23c;
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.ac-worker-idle {
+  color: #e6a23c;
+  font-size: 12px;
+}
+
+/* ===== 收工对话框里的参与人结算 ===== */
+.ac-finish-workers {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed #dcdfe6;
+}
+
+.ac-finish-workers-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.ac-finish-sum {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: #606266;
 }
 
 .mr-1 {

@@ -392,10 +392,10 @@ else
 fi
 AC_ROUTES=$(grep -c "/api/aging_cart/" "$B/public/index.php" 2>/dev/null | tr -d ' ')
 AC_MW=$(grep -c "aging_cart'\]\]" "$B/public/index.php" 2>/dev/null | tr -d ' ')
-if [ "${AC_ROUTES:-0}" -ge 12 ] && [ "${AC_MW:-0}" -ge 12 ]; then
+if [ "${AC_ROUTES:-0}" -ge 14 ] && [ "${AC_MW:-0}" -ge 14 ]; then
     echo "  [OK]     /api/aging_cart/* 路由 ${AC_ROUTES} 条，中间件均为双层方括号"; pass=$((pass+1))
 else
-    echo "  [缺失]   aging_cart 路由不全（路由 ${AC_ROUTES:-0} 条 / 双层方括号 ${AC_MW:-0} 处，期望均 ≥12）"; fail=$((fail+1))
+    echo "  [缺失]   aging_cart 路由不全（路由 ${AC_ROUTES:-0} 条 / 双层方括号 ${AC_MW:-0} 处，期望均 ≥14，含多人维修的 join/leave 两条）"; fail=$((fail+1))
 fi
 # 车辆总数配置：调总数接口 + 配置表 + 台账按配置同步
 if grep -q "/api/aging_cart/set_cart_total" "$B/public/index.php" 2>/dev/null \
@@ -502,6 +502,31 @@ if grep -q "iconMap\[item.icon\] || Menu" "$F/src/layout/Layout.vue" 2>/dev/null
     echo "  [OK]     图标渲染已带兜底（未登记图标显示默认图标而非空白）"; pass=$((pass+1))
 else
     echo "  [警告]   图标渲染缺兜底，新增图标漏登记时会显示空白"; warn=$((warn+1))
+fi
+if grep -q "joinRepair" "$B/app/Controllers/AgingCartController.php" 2>/dev/null \
+   && grep -q "closeWorkerRows" "$B/app/Controllers/AgingCartController.php" 2>/dev/null \
+   && grep -q "loadWorkers" "$B/app/Controllers/AgingCartController.php" 2>/dev/null; then
+    echo "  [OK]     多人维修核心方法齐备（参与/结算/明细）"; pass=$((pass+1))
+else
+    echo "  [缺失]   缺少多人维修实现（joinRepair / closeWorkerRows / loadWorkers）"; fail=$((fail+1))
+fi
+if grep -q "me_joined" "$B/app/Controllers/AgingCartController.php" 2>/dev/null \
+   && grep -q "me_joined" "$F/src/views/aging_cart/Index.vue" 2>/dev/null; then
+    echo "  [OK]     「我是否在修」由后端下发，前后端字段一致"; pass=$((pass+1))
+else
+    echo "  [缺失]   me_joined 缺失或前后端不一致 → 参与/收工按钮会错乱"; fail=$((fail+1))
+fi
+# ★ 收工必须把仍在修的人一并结账，否则出现「工单已完、某人还在计时」的脏数据
+AC_FINISH=$(awk '/public function finish/,/^    }$/' "$B/app/Controllers/AgingCartController.php" 2>/dev/null)
+if printf '%s\n' "$AC_FINISH" | grep -q "closeWorkerRows"; then
+    echo "  [OK]     收工会一并结束所有在修人员的计时"; pass=$((pass+1))
+else
+    echo "  [缺失]   finish() 未调用 closeWorkerRows → 多人协作时他人工时会漏结算"; fail=$((fail+1))
+fi
+if grep -q "ensurePresetRoles" "$B/app/Core/Schema.php" 2>/dev/null; then
+    echo "  [OK]     Schema 版本 5 含表结构自愈入口"; pass=$((pass+1))
+else
+    echo "  [缺失]   Schema 自愈入口缺失"; fail=$((fail+1))
 fi
 echo "  [提示]   模块登记需执行一次 SQL：tools/老化车模块初始化.sql（否则普通用户看不到菜单）"
 

@@ -189,6 +189,41 @@ class AgingCartController
                 INDEX `idx_finished_at` (`repair_finished_at`)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='老化车报修维修记录';");
 
+            $this->db->exec("CREATE TABLE IF NOT EXISTS `aging_repair_workers` (
+                `id` INT NOT NULL AUTO_INCREMENT,
+                `repair_id` INT NOT NULL COMMENT '所属报修维修单ID',
+                `user_id` INT NOT NULL DEFAULT 0 COMMENT '维修人员ID',
+                `user_name` VARCHAR(64) NOT NULL DEFAULT '' COMMENT '维修人员姓名',
+                `is_starter` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1=首个接单开工的人',
+                `joined_at` DATETIME NOT NULL COMMENT '加入维修时刻',
+                `left_at` DATETIME NULL COMMENT '离开(本人完成)时刻，NULL 表示仍在维修',
+                `raw_minutes` INT NOT NULL DEFAULT 0 COMMENT '本人自然时长(分钟)',
+                `duration_minutes` INT NOT NULL DEFAULT 0 COMMENT '本人有效时长(分钟)',
+                `status` VARCHAR(20) NOT NULL DEFAULT 'working' COMMENT 'working维修中/left已离开',
+                `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (`id`),
+                UNIQUE KEY `uk_repair_user_join` (`repair_id`, `user_id`, `joined_at`),
+                INDEX `idx_repair_id` (`repair_id`),
+                INDEX `idx_user_id` (`user_id`),
+                INDEX `idx_status` (`status`)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='老化车维修参与人（多人同时维修时各自独立计时）';");
+
+            // 历史数据迁移：把已存在的单人维修记录转成参与人记录，
+            // 否则老工单会显示为「0 人参与」，且历史工时无法按人统计。
+            $this->db->exec(
+                "INSERT IGNORE INTO `aging_repair_workers`
+                    (`repair_id`, `user_id`, `user_name`, `is_starter`, `joined_at`, `left_at`,
+                     `raw_minutes`, `duration_minutes`, `status`)
+                 SELECT r.id, r.repairer_id, r.repairer_name, 1, r.repair_started_at,
+                        CASE WHEN r.status = 'done' THEN r.repair_finished_at ELSE NULL END,
+                        CASE WHEN r.status = 'done' THEN r.raw_minutes ELSE 0 END,
+                        CASE WHEN r.status = 'done' THEN r.duration_minutes ELSE 0 END,
+                        CASE WHEN r.status = 'done' THEN 'left' ELSE 'working' END
+                 FROM `aging_repairs` r
+                 WHERE r.repair_started_at IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM `aging_repair_workers` w WHERE w.repair_id = r.id)"
+            );
+
             // 兼容本模块早期版本：老库缺列时自动补齐（ensureColumn 内部已做存在性判断）
             Schema::ensureColumn($this->db, 'aging_carts', 'layers',
                 "`layers` TINYINT UNSIGNED NULL DEFAULT NULL COMMENT '层数' AFTER `status`");
@@ -381,8 +416,23 @@ class AgingCartController
                  WHERE status = 'done' AND repair_finished_at IS NOT NULL
                  ORDER BY repair_finished_at DESC LIMIT 5"
             )->fetchAll(PDO::FETCH_ASSOC);
+            $now0 = $this->now();
             foreach ($latest as &$r) {
                 $r['duration_text'] = WorkDuration::format((int)$r['duration_minutes']);
+                // 补参与人明细：最近修好的卡片上要能看出是几个人一起修的
+                $ws = $this->loadWorkers((int)$r['id'], $now0);
+                $names = [];
+                $work = 0;
+                foreach ($ws as $w) {
+                    $names[] = $w['user_name'];
+                    $work += $w['duration_minutes'];
+                }
+                $r['workers'] = $ws;
+                $r['worker_names'] = implode('、', $names);
+                $r['worker_count'] = count($ws);
+                $r['is_multi_worker'] = count($ws) > 1;
+                $r['work_minutes'] = $work;
+                $r['work_text'] = WorkDuration::format($work);
             }
             unset($r);
 
@@ -396,13 +446,17 @@ class AgingCartController
             $st->execute([$ps, $pe]);
             $topCarts = $st->fetchAll(PDO::FETCH_ASSOC);
 
-            // 本月维修人员工作量
+            // 本月维修人员工作量：★ 按「参与人」统计，不再按工单的 repairer_name。
+            // 多人协作时每人只记自己的工时，谁的贡献算谁的，不再笼统记到工单人头上。
             $st = $this->db->prepare(
-                "SELECT repairer_name AS name, COUNT(*) AS times, COALESCE(SUM(duration_minutes), 0) AS minutes
-                 FROM `aging_repairs`
-                 WHERE status = 'done' AND repair_finished_at IS NOT NULL
-                       AND repair_finished_at >= ? AND repair_finished_at <= ?
-                 GROUP BY repairer_name ORDER BY times DESC, minutes DESC LIMIT 10"
+                "SELECT w.user_name AS name,
+                        COUNT(DISTINCT w.repair_id) AS times,
+                        COALESCE(SUM(w.duration_minutes), 0) AS minutes
+                 FROM `aging_repair_workers` w
+                 JOIN `aging_repairs` r ON r.id = w.repair_id AND r.status = 'done'
+                       AND r.repair_finished_at IS NOT NULL
+                       AND r.repair_finished_at >= ? AND r.repair_finished_at <= ?
+                 GROUP BY w.user_name ORDER BY times DESC, minutes DESC LIMIT 10"
             );
             $st->execute([$ps, $pe]);
             $workers = $st->fetchAll(PDO::FETCH_ASSOC);
@@ -413,6 +467,31 @@ class AgingCartController
                 }
             }
             unset($w);
+
+            // 本月投入工时合计（各人有效时长之和，含多人重叠部分）
+            $st = $this->db->prepare(
+                "SELECT COALESCE(SUM(w.duration_minutes), 0)
+                 FROM `aging_repair_workers` w
+                 JOIN `aging_repairs` r ON r.id = w.repair_id AND r.status = 'done'
+                       AND r.repair_finished_at IS NOT NULL
+                       AND r.repair_finished_at >= ? AND r.repair_finished_at <= ?"
+            );
+            $st->execute([$ps, $pe]);
+            $monthWorkMinutes = (int)$st->fetchColumn();
+
+            // 本月多人协作完成的工单数
+            $st = $this->db->prepare(
+                "SELECT COUNT(*) FROM (
+                    SELECT w.repair_id
+                    FROM `aging_repair_workers` w
+                    JOIN `aging_repairs` r ON r.id = w.repair_id AND r.status = 'done'
+                          AND r.repair_finished_at IS NOT NULL
+                          AND r.repair_finished_at >= ? AND r.repair_finished_at <= ?
+                    GROUP BY w.repair_id HAVING COUNT(DISTINCT w.user_id) > 1
+                 ) t"
+            );
+            $st->execute([$ps, $pe]);
+            $monthCollab = (int)$st->fetchColumn();
 
             Response::success('success', [
                 'period'            => $period,
@@ -430,6 +509,11 @@ class AgingCartController
                 'month_avg_minutes' => $avgMinutes,
                 'month_minutes_text' => WorkDuration::format($monthMinutes),
                 'month_avg_text'    => WorkDuration::format($avgMinutes),
+                // 投入工时合计（含多人重叠，通常 >= 上面的跨度合计）
+                'month_work_minutes' => $monthWorkMinutes,
+                'month_work_text'    => WorkDuration::format($monthWorkMinutes),
+                // 本月有多人同时参与的已完工单数
+                'month_collab'      => $monthCollab,
                 'latest_fixed'      => $latest,
                 'top_carts'         => $topCarts,
                 'workers'           => $workers,
@@ -544,8 +628,11 @@ class AgingCartController
                 $params[] = $cartNo;
             }
             if ($keyword !== '') {
-                $where[] = '(r.fault_desc LIKE ? OR r.repair_remark LIKE ? OR r.reporter_name LIKE ? OR r.repairer_name LIKE ?)';
+                $where[] = '(r.fault_desc LIKE ? OR r.repair_remark LIKE ? OR r.reporter_name LIKE ? OR r.repairer_name LIKE ?
+                             OR EXISTS (SELECT 1 FROM `aging_repair_workers` w
+                                        WHERE w.repair_id = r.id AND w.user_name LIKE ?))';
                 $kw = '%' . $keyword . '%';
+                $params[] = $kw;
                 $params[] = $kw;
                 $params[] = $kw;
                 $params[] = $kw;
@@ -575,16 +662,47 @@ class AgingCartController
             $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
             $now = $this->now();
+            $meId = $this->userId();
             foreach ($rows as &$r) {
+                $repairId = (int)$r['id'];
+                $status = (string)$r['status'];
+
+                // 口径一：修复跨度（开始 → 完成/现在）
                 $r['duration_text'] = WorkDuration::format((int)$r['duration_minutes']);
                 $r['raw_text'] = WorkDuration::format((int)$r['raw_minutes']);
                 $r['elapsed_minutes'] = 0;
                 $r['elapsed_text'] = '';
-                if ((string)$r['status'] === 'repairing' && !empty($r['repair_started_at'])) {
+                if ($status === 'repairing' && !empty($r['repair_started_at'])) {
                     $elapsed = WorkDuration::minutes((string)$r['repair_started_at'], $now);
                     $r['elapsed_minutes'] = $elapsed;
                     $r['elapsed_text'] = WorkDuration::format($elapsed);
                 }
+
+                // 口径二：投入工时合计 + 参与人明细（多人同时维修的核心展示）
+                $workers = $this->loadWorkers($repairId, $now);
+                $workMinutes = 0;
+                $rawWork = 0;
+                $active = 0;
+                $meJoined = false;
+                foreach ($workers as $w) {
+                    $workMinutes += $w['duration_minutes'];
+                    $rawWork += $w['raw_minutes'];
+                    if ($w['working']) {
+                        $active++;
+                        if ($w['user_id'] === $meId) {
+                            $meJoined = true;
+                        }
+                    }
+                }
+                $r['workers'] = $workers;
+                $r['worker_count'] = count($workers);
+                $r['active_worker_count'] = $active;
+                $r['is_multi_worker'] = count($workers) > 1;
+                $r['work_minutes'] = $workMinutes;
+                $r['work_text'] = WorkDuration::format($workMinutes);
+                $r['raw_work_text'] = WorkDuration::format($rawWork);
+                // 后端判定「我是否已在修」，前端不比对 local 用户，避免会话信息陈旧导致按钮错乱
+                $r['me_joined'] = $meJoined;
             }
             unset($r);
 
@@ -757,10 +875,26 @@ class AgingCartController
     }
 
     // ============================================================
-    //  接口：开始维修
+    //  接口：参与维修（多人同时维修的核心）
+    //
+    //  ★ 为什么这样设计：
+    //    单人模型下「先到者把后到者挤掉」，多人同修必然丢人、丢工时。
+    //    改为「一张工单 + N 个参与人」：每个人有自己的加入/离开时刻，各自独立计时。
+    //
+    //  ★ 工单落成两个口径的时长，含义不同，都保留：
+    //    - 修复跨度 span_minutes：从第一个人开工到最后收工（WorkDuration 扣非工时后）
+    //      → 回答「这辆车修了多久」，用于 MTTR / 停线时长。
+    //    - 投入工时 work_minutes：各人有效时长之和
+    //      → 回答「总共投入了多少人力」，用于工作量统计。多人重叠时它大于跨度，这是正常的。
     // ============================================================
 
-    public function start(): void
+    /**
+     * 加入维修（幂等）。
+     * - 工单待维修：本人为「开工者」，工单进入维修中并开始计跨度；
+     * - 工单维修中：本人为「协助人」，从第 2 人起即为多人协作；
+     * - 本人已在修：重复点击直接返回成功（防连点、防网络重试产生重复计时）。
+     */
+    private function joinRepair(): void
     {
         try {
             $input = $this->input();
@@ -770,51 +904,273 @@ class AgingCartController
                 return;
             }
 
-            $stmt = $this->db->prepare("SELECT id, cart_no, status FROM `aging_repairs` WHERE id = ? LIMIT 1");
-            $stmt->execute([$id]);
-            $row = $stmt->fetch(PDO::FETCH_ASSOC);
+            $row = $this->fetchRepair($id);
             if (!$row) {
                 Response::error('记录不存在');
                 return;
             }
-            if ((string)$row['status'] === 'repairing') {
-                Response::error('该记录已在维修中');
-                return;
-            }
-            if ((string)$row['status'] === 'done') {
+            $status = (string)$row['status'];
+            if ($status === 'done') {
                 Response::error('该记录已完成维修');
                 return;
             }
-
-            $now = $this->now()->format('Y-m-d H:i:s');
-
-            $this->db->beginTransaction();
-            // 条件更新 + rowCount 双重校验，避免并发下两人同时接单
-            $upd = $this->db->prepare(
-                "UPDATE `aging_repairs`
-                 SET status = 'repairing', repairer_id = ?, repairer_name = ?, repair_started_at = ?
-                 WHERE id = ? AND status = 'pending'"
-            );
-            $upd->execute([$this->userId(), $this->userName(), $now, $id]);
-            if ($upd->rowCount() === 0) {
-                $this->db->rollBack();
-                Response::error('该报修已被他人接单，请刷新后重试');
+            if (!in_array($status, ['pending', 'repairing'], true)) {
+                Response::error('该记录状态不允许维修');
                 return;
             }
 
-            $cartUpd = $this->db->prepare("UPDATE `aging_carts` SET status = 'repairing' WHERE cart_no = ?");
-            $cartUpd->execute([(string)$row['cart_no']]);
+            $now = $this->now();
+            $nowStr = $now->format('Y-m-d H:i:s');
+            $cartNo = (string)$row['cart_no'];
+
+            $this->db->beginTransaction();
+
+            // 本人在本单是否已在修（幂等判定，含已离开的需重新计算）
+            $mine = $this->db->prepare(
+                "SELECT id FROM `aging_repair_workers`
+                 WHERE repair_id = ? AND user_id = ? AND status = 'working' AND left_at IS NULL LIMIT 1"
+            );
+            $mine->execute([$id, $this->userId()]);
+            if ($mine->fetchColumn()) {
+                $this->db->commit();
+                Response::success('你已在本单维修中', ['already' => true, 'joined_at' => $nowStr]);
+                return;
+            }
+
+            $isStarter = false;
+
+            if ($status === 'pending') {
+                // 条件更新 + rowCount 兜底：并发下两人同时抢首工时，只有一人成功
+                $upd = $this->db->prepare(
+                    "UPDATE `aging_repairs`
+                     SET status = 'repairing', repairer_id = ?, repairer_name = ?, repair_started_at = ?
+                     WHERE id = ? AND status = 'pending'"
+                );
+                $upd->execute([$this->userId(), $this->userName(), $nowStr, $id]);
+                if ($upd->rowCount() > 0) {
+                    $isStarter = true;
+                    $cartUpd = $this->db->prepare("UPDATE `aging_carts` SET status = 'repairing' WHERE cart_no = ?");
+                    $cartUpd->execute([$cartNo]);
+                }
+                // rowCount = 0：说明被并发他人抢先开局，本人降级为协助人继续参与
+            }
+
+            $ins = $this->db->prepare(
+                "INSERT IGNORE INTO `aging_repair_workers`
+                    (`repair_id`, `user_id`, `user_name`, `is_starter`, `joined_at`, `left_at`, `status`)
+                 VALUES (?, ?, ?, ?, ?, NULL, 'working')"
+            );
+            $ins->execute([$id, $this->userId(), $this->userName(), $isStarter ? 1 : 0, $nowStr]);
+
+            // INSERT IGNORE 被唯一键挡下 = 同一秒内重复提交，视为已成功，不影响计时
+            $workers = $this->countWorkers($id);
             $this->db->commit();
 
-            AuditService::log('老化车维修', '开始维修 ' . (string)$row['cart_no']);
+            AuditService::log('老化车维修', ($isStarter ? '开始维修 ' : '参与维修 ') . $cartNo);
 
-            Response::success('已开始维修，计时开始', ['started_at' => $now]);
+            Response::success($isStarter ? '已开始维修，计时开始' : '已加入维修，你的工时独立计算', [
+                'is_starter'   => $isStarter,
+                'joined_at'    => $nowStr,
+                'worker_count' => $workers['total'],
+                'active_count' => $workers['active'],
+            ]);
         } catch (Throwable $e) {
             if ($this->db->inTransaction()) {
                 $this->db->rollBack();
             }
-            Response::exception($e, '开始维修失败');
+            Response::exception($e, '加入维修失败');
         }
+    }
+
+    /** 开始维修（首个百分点入口，保留以兼容旧调用） */
+    public function start(): void
+    {
+        $this->joinRepair();
+    }
+
+    /** 参与维修（工单已在维修中时，第 2 人及以后走这里） */
+    public function join(): void
+    {
+        $this->joinRepair();
+    }
+
+    /**
+     * 本人完成 / 离开（不结束整张工单）。
+     * 典型场景：三人一起修，张三先收工、李四王五继续 —— 张三的工时就停在他离开的时刻。
+     */
+    public function leave(): void
+    {
+        try {
+            $input = $this->input();
+            $id = (int)($input['id'] ?? 0);
+            if ($id <= 0) {
+                Response::error('无效的记录ID');
+                return;
+            }
+
+            $row = $this->fetchRepair($id);
+            if (!$row) {
+                Response::error('记录不存在');
+                return;
+            }
+            if ((string)$row['status'] !== 'repairing') {
+                Response::error('只有维修中的记录才能结束个人计时');
+                return;
+            }
+
+            $now = $this->now();
+            $nowStr = $now->format('Y-m-d H:i:s');
+
+            $this->db->beginTransaction();
+
+            $sel = $this->db->prepare(
+                "SELECT id, joined_at FROM `aging_repair_workers`
+                 WHERE repair_id = ? AND user_id = ? AND status = 'working' AND left_at IS NULL
+                 ORDER BY id DESC LIMIT 1"
+            );
+            $sel->execute([$id, $this->userId()]);
+            $mine = $sel->fetch(PDO::FETCH_ASSOC);
+            if (!$mine) {
+                $this->db->rollBack();
+                Response::error('你不在这张工单的维修人中');
+                return;
+            }
+
+            $startDt = WorkDuration::parse((string)$mine['joined_at']);
+            if ($startDt === null) {
+                $this->db->rollBack();
+                Response::error('加入时间无法解析，请联系管理员核对数据');
+                return;
+            }
+            $rawMinutes = (int)floor(($now->getTimestamp() - $startDt->getTimestamp()) / 60);
+            $duration = WorkDuration::minutes($startDt, $now);
+
+            $upd = $this->db->prepare(
+                "UPDATE `aging_repair_workers`
+                 SET left_at = ?, raw_minutes = ?, duration_minutes = ?, status = 'left'
+                 WHERE id = ? AND status = 'working' AND left_at IS NULL"
+            );
+            $upd->execute([$nowStr, $rawMinutes, $duration, (int)$mine['id']]);
+            if ($upd->rowCount() === 0) {
+                $this->db->rollBack();
+                Response::error('你的维修计时已结束，请刷新后重试');
+                return;
+            }
+
+            $workers = $this->countWorkers($id);
+            $this->db->commit();
+
+            AuditService::log('老化车维修', '结束个人维修计时 ' . (string)$row['cart_no']);
+
+            Response::success('已结束你的维修计时', [
+                'duration_minutes' => $duration,
+                'duration_text'    => WorkDuration::format($duration),
+                'left_at'          => $nowStr,
+                'active_count'     => $workers['active'],
+            ]);
+        } catch (Throwable $e) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+            Response::exception($e, '结束维修计时失败');
+        }
+    }
+
+    /** 取一张工单的参与人统计：总人数 / 仍在修人数 */
+    private function countWorkers(int $repairId): array
+    {
+        $st = $this->db->prepare(
+            "SELECT COUNT(*) AS total,
+                    SUM(CASE WHEN status = 'working' AND left_at IS NULL THEN 1 ELSE 0 END) AS active
+             FROM `aging_repair_workers` WHERE repair_id = ?"
+        );
+        $st->execute([$repairId]);
+        $r = $st->fetch(PDO::FETCH_ASSOC) ?: ['total' => 0, 'active' => 0];
+        return ['total' => (int)$r['total'], 'active' => (int)$r['active']];
+    }
+
+    /**
+     * 把某张工单上「仍在修」的参与人全部结账到 $end 时刻。
+     *
+     * ⚠️ 必须在事务内调用，且 $end 就是工单的 repair_finished_at：
+     *    否则会出现「工单已完成、但某人还在计时」的脏数据。
+     */
+    private function closeWorkerRows(int $repairId, DateTimeImmutable $end): void
+    {
+        $st = $this->db->prepare(
+            "SELECT id, joined_at FROM `aging_repair_workers`
+             WHERE repair_id = ? AND status = 'working' AND left_at IS NULL"
+        );
+        $st->execute([$repairId]);
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+        $endStr = $end->format('Y-m-d H:i:s');
+        $upd = $this->db->prepare(
+            "UPDATE `aging_repair_workers`
+             SET left_at = ?, raw_minutes = ?, duration_minutes = ?, status = 'left'
+             WHERE id = ? AND status = 'working' AND left_at IS NULL"
+        );
+
+        foreach ($rows as $w) {
+            $startDt = WorkDuration::parse((string)$w['joined_at']);
+            if ($startDt === null) {
+                continue;
+            }
+            $raw = (int)floor(($end->getTimestamp() - $startDt->getTimestamp()) / 60);
+            $minutes = WorkDuration::minutes($startDt, $end);
+            $upd->execute([$endStr, $raw, $minutes, (int)$w['id']]);
+        }
+    }
+
+    private function fetchRepair(int $id): ?array
+    {
+        $stmt = $this->db->prepare("SELECT * FROM `aging_repairs` WHERE id = ? LIMIT 1");
+        $stmt->execute([$id]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        return $row ?: null;
+    }
+
+    /**
+     * 读取某张工单的参与人明细。
+     * 仍在修的人按传进来的时刻实时计算已用时（不落库，避免每帧写库）。
+     */
+    private function loadWorkers(int $repairId, DateTimeImmutable $ref): array
+    {
+        $st = $this->db->prepare(
+            "SELECT id, user_id, user_name, is_starter, joined_at, left_at,
+                    raw_minutes, duration_minutes, status
+             FROM `aging_repair_workers` WHERE repair_id = ? ORDER BY id ASC"
+        );
+        $st->execute([$repairId]);
+        $rows = $st->fetchAll(PDO::FETCH_ASSOC) ?: [];
+
+        $out = [];
+        foreach ($rows as $w) {
+            $joined = WorkDuration::parse((string)$w['joined_at']);
+            $working = ((string)$w['status'] === 'working' && empty($w['left_at']));
+
+            $minutes = (int)$w['duration_minutes'];
+            $raw = (int)$w['raw_minutes'];
+            if ($working && $joined !== null) {
+                // 实时值：加入时刻到现在（结束时会正式落库）
+                $raw = (int)floor(($ref->getTimestamp() - $joined->getTimestamp()) / 60);
+                $minutes = WorkDuration::minutes($joined, $ref);
+            }
+
+            $out[] = [
+                'worker_id'        => (int)$w['id'],
+                'user_id'          => (int)$w['user_id'],
+                'user_name'        => (string)$w['user_name'],
+                'is_starter'       => (int)$w['is_starter'] === 1,
+                'joined_at'        => (string)$w['joined_at'],
+                'left_at'          => $w['left_at'] === null ? '' : (string)$w['left_at'],
+                'working'          => $working,
+                'duration_minutes' => $minutes,
+                'duration_text'    => WorkDuration::format($minutes),
+                'raw_minutes'      => $raw,
+            ];
+        }
+        return $out;
     }
 
     // ============================================================
@@ -865,8 +1221,9 @@ class AgingCartController
                 return;
             }
 
-            $rawMinutes = (int)floor(($endDt->getTimestamp() - $startDt->getTimestamp()) / 60);
-            $duration = WorkDuration::minutes($startDt, $endDt);
+            // 口径一：修复跨度（工单层面，回答「这辆车修了多久」）
+            $spanRaw = (int)floor(($endDt->getTimestamp() - $startDt->getTimestamp()) / 60);
+            $span = WorkDuration::minutes($startDt, $endDt);
             $finishedAt = $endDt->format('Y-m-d H:i:s');
 
             $this->db->beginTransaction();
@@ -875,12 +1232,22 @@ class AgingCartController
                  SET status = 'done', repair_finished_at = ?, raw_minutes = ?, duration_minutes = ?, repair_remark = ?
                  WHERE id = ? AND status = 'repairing'"
             );
-            $upd->execute([$finishedAt, $rawMinutes, $duration, $remark, $id]);
+            $upd->execute([$finishedAt, $spanRaw, $span, $remark, $id]);
             if ($upd->rowCount() === 0) {
                 $this->db->rollBack();
                 Response::error('记录状态已变更，请刷新后重试');
                 return;
             }
+
+            // 收工时把所有仍在修的人一并结账，不能让他们的时间停在上线为止
+            $this->closeWorkerRows($id, $endDt);
+
+            // 口径二：投入工时合计（各人有效时长之和，多人重叠时大于跨度为正常）
+            $sum = $this->db->prepare(
+                "SELECT COALESCE(SUM(duration_minutes), 0) FROM `aging_repair_workers` WHERE repair_id = ?"
+            );
+            $sum->execute([$id]);
+            $workMinutes = (int)$sum->fetchColumn();
 
             $cartUpd = $this->db->prepare("UPDATE `aging_carts` SET status = 'normal' WHERE cart_no = ?");
             $cartUpd->execute([(string)$row['cart_no']]);
@@ -889,11 +1256,16 @@ class AgingCartController
             AuditService::log('老化车维修', '完成维修 ' . (string)$row['cart_no']);
 
             Response::success('维修完成', [
-                'duration_minutes' => $duration,
-                'duration_text'    => WorkDuration::format($duration),
-                'raw_minutes'      => $rawMinutes,
-                'raw_text'         => WorkDuration::format($rawMinutes),
+                // 工单跨度
+                'duration_minutes' => $span,
+                'duration_text'    => WorkDuration::format($span),
+                'raw_minutes'      => $spanRaw,
+                'raw_text'         => WorkDuration::format($spanRaw),
+                // 投入工时
+                'work_minutes'     => $workMinutes,
+                'work_text'        => WorkDuration::format($workMinutes),
                 'finished_at'      => $finishedAt,
+                'workers'          => $this->loadWorkers($id, $endDt),
             ]);
         } catch (Throwable $e) {
             if ($this->db->inTransaction()) {
@@ -1008,8 +1380,12 @@ class AgingCartController
             }
             $cartNo = (string)$row['cart_no'];
 
+            $this->db->beginTransaction();
+            $delw = $this->db->prepare("DELETE FROM `aging_repair_workers` WHERE repair_id = ?");
+            $delw->execute([$id]);
             $del = $this->db->prepare("DELETE FROM `aging_repairs` WHERE id = ?");
             $del->execute([$id]);
+            $this->db->commit();
 
             $this->syncCartStatus($cartNo);
 
@@ -1194,10 +1570,27 @@ class AgingCartController
             $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
             $statusMap = ['pending' => '待维修', 'repairing' => '维修中', 'done' => '已修复'];
-            $headers = ['编号', '老化车', '故障类型', '故障现象', '状态', '报修人', '报修时间', '维修人', '开始维修', '完成时间', '有效时长(分钟)', '自然时长(分钟)', '维修备注'];
+            $headers = [
+                '编号', '老化车', '故障类型', '故障现象', '状态', '报修人', '报修时间',
+                '参与维修人员', '参与人数', '首接人', '开始维修', '完成时间',
+                '修复跨度(分钟)', '自然跨度(分钟)', '投入工时合计(分钟)', '维修备注',
+            ];
 
+            $now0 = $this->now();
             $data = [];
             foreach ($rows as $r) {
+                $ws = $this->loadWorkers((int)$r['id'], $now0);
+                $names = [];
+                $work = 0;
+                $starter = '';
+                foreach ($ws as $w) {
+                    // 仍在修的人附实时工时，导出的那一刻即为截止值
+                    $names[] = $w['user_name'] . '(' . $w['duration_text'] . ($w['working'] ? ' 在修中' : '') . ')';
+                    $work += $w['duration_minutes'];
+                    if ($w['is_starter']) {
+                        $starter = $w['user_name'];
+                    }
+                }
                 $data[] = [
                     (string)$r['id'],
                     (string)$r['cart_no'],
@@ -1206,14 +1599,21 @@ class AgingCartController
                     $statusMap[(string)$r['status']] ?? (string)$r['status'],
                     (string)$r['reporter_name'],
                     (string)$r['reported_at'],
-                    (string)$r['repairer_name'],
+                    implode('、', $names),
+                    (string)count($ws),
+                    $starter,
                     (string)($r['repair_started_at'] ?? ''),
                     (string)($r['repair_finished_at'] ?? ''),
                     (string)$r['duration_minutes'],
                     (string)$r['raw_minutes'],
+                    (string)$work,
                     (string)$r['repair_remark'],
                 ];
             }
+
+            // 列数随表头自动推导，避免以后加列漏改样式范围
+            $colCount = count($headers);
+            $lastCol = \PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($colCount);
 
             // 优先输出 Excel（服务器已装 PhpSpreadsheet），否则回退 CSV
             if (class_exists(\PhpOffice\PhpSpreadsheet\Spreadsheet::class)) {
@@ -1231,12 +1631,13 @@ class AgingCartController
                     }
                     $line++;
                 }
-                $ws->getStyle('A1:M1')->getFont()->setBold(true)->getColor()->setRGB('FFFFFF');
-                $ws->getStyle('A1:M1')->getFill()
+                $headRange = 'A1:' . $lastCol . '1';
+                $ws->getStyle($headRange)->getFont()->setBold(true)->getColor()->setRGB('FFFFFF');
+                $ws->getStyle($headRange)->getFill()
                     ->setFillType(\PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID)
                     ->getStartColor()->setRGB('2F5597');
-                foreach (range('A', 'M') as $col) {
-                    $ws->getColumnDimension($col)->setAutoSize(true);
+                for ($i = 1; $i <= $colCount; $i++) {
+                    $ws->getColumnDimension(\PhpOffice\PhpSpreadsheet\Cell\Coordinate::stringFromColumnIndex($i))->setAutoSize(true);
                 }
 
                 while (ob_get_level()) {
