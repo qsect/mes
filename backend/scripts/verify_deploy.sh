@@ -573,6 +573,38 @@ else
 fi
 
 echo ""
+echo "── 二十、CEM 推送（凭据 / 容错）──"
+# ★ 凭据缺失时 CEM 会返回登录页，报错是"未查到流程卡号/未返回成功弹窗"这类误导信息，
+#   所以这里直接判定凭据是否可用（只判有无，绝不打印明文）。
+CEM_CHK=$(cd "$B" && $PHP_BIN -r '
+$f = ".env";
+if (is_file($f)) { foreach (file($f, FILE_IGNORE_NEW_LINES|FILE_SKIP_EMPTY_LINES) as $l) { $l = trim($l); if ($l === "" || $l[0] === "#") { continue; } if (strpos($l, "=") !== false) { $a = explode("=", $l, 2); $_ENV[trim($a[0])] = trim($a[1], " \"\x27"); } } }
+$local = []; $lf = "config/cem.local.php";
+if (is_file($lf)) { $d = include $lf; if (is_array($d)) { $local = $d; } }
+$u = $_ENV["CEM_USER"] ?? ($local["CEM_USER"] ?? "");
+$p = $_ENV["CEM_PASS"] ?? ($local["CEM_PASS"] ?? "");
+echo ($u !== "" && $p !== "") ? "OK" : "MISS";
+' 2>/dev/null)
+if [ "$CEM_CHK" = "OK" ]; then
+    echo "  [OK]     CEM 凭据已配置（CEM_USER / CEM_PASS 均可解析）"; pass=$((pass+1))
+else
+    echo "  [缺失]   CEM 凭据缺失 → 登录必然失败，推送会报误导性错误"; fail=$((fail+1))
+    echo "           补充到 backend/.env 或 backend/config/cem.local.php"
+fi
+if grep -q "assertConfigured" "$B/includes/CemClient.php" 2>/dev/null \
+   && grep -q "lastError" "$B/includes/CemClient.php" 2>/dev/null \
+   && grep -q "ensureLogin()" "$B/includes/CemPushService.php" 2>/dev/null; then
+    echo "  [OK]     登录失败不再静默：上传前强制校验凭据与会话"; pass=$((pass+1))
+else
+    echo "  [缺失]   缺少登录失败显式化（assertConfigured / lastError）"; fail=$((fail+1))
+fi
+if [ -f "$B/scripts/diag_cem.php" ]; then
+    echo "  [OK]     诊断脚本存在：backend/scripts/diag_cem.php"; pass=$((pass+1))
+else
+    echo "  [警告]   缺少诊断脚本 backend/scripts/diag_cem.php"; warn=$((warn+1))
+fi
+
+echo ""
 echo "=================================================="
 echo " 通过 $pass 项 / 失败 $fail 项"
 if [ "$warn" -gt 0 ]; then

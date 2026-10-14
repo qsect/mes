@@ -74,6 +74,13 @@ class CemPushService
         $client    = new CemClient();
         $cardError = '';
 
+        // ★ 提前校验：凭据缺失 / 登录失败都在这里明确抛出，
+        //   不要等到上传后拿登录页当结果，报出"未返回成功弹窗"这种无法定位的错误。
+        CemClient::assertConfigured();
+        if (!$client->ensureLogin()) {
+            throw new Exception('CEM 登录失败：' . ($client->lastError() ?: '未知原因'));
+        }
+
         if ($isXqOrder) {
             // XQ 单：
             //   H 任务号 = CEM 流程卡号(tasksid)

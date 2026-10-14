@@ -595,11 +595,18 @@ const triggerTaskCompleted = (wo) => {
   cemLoading.value = true;
   cemDialogVisible.value = true;
 
-  request.post('/trace/manualPushCem', { task_order: wo }, { timeout: 120000 }).then(() => {
-    cemStatusText.value = '✅ CEM 已经同步完成！本单所有追溯明细已顺利上传至 CEM 平台。';
+  request.post('/trace/manualPushCem', { task_order: wo }, { timeout: 120000 }).then((res) => {
+    // 成功时也把服务端返回的明细条数带上，避免"提示成功但到底传了几条"不清楚
+    const n = res && res.data && res.data.count;
+    cemStatusText.value = '✅ CEM 已经同步完成！'
+      + (n ? `本单共上传 ${n} 条追溯明细。` : '本单所有追溯明细已顺利上传至 CEM 平台。');
     cemLoading.value = false;
   }).catch((e) => {
-    cemStatusText.value = '⚠️ 本地扫码已完成，但 CEM 自动上传未成功，可在【追溯记录查询与导出】页随时补推。';
+    // ★ 显示服务端返回的真实原因，而不是一句笼统的"未成功"
+    const detail = (e && e.message) ? String(e.message) : '';
+    cemStatusText.value = '⚠️ 本地扫码已完成，但 CEM 上传未成功。'
+      + (detail ? `原因：${detail}。` : '')
+      + '可在【追溯记录查询与导出】页随时补推。';
     cemLoading.value = false;
   });
 };

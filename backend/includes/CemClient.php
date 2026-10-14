@@ -37,6 +37,35 @@ class CemClient
     public static function cemUser(): string { return self::cred('CEM_USER'); }
     public static function cemPass(): string { return self::cred('CEM_PASS'); }
 
+    /** 上一次登录/会话失败的原因（供调用方给出明确提示，避免"静默失败"） */
+    private string $lastError = '';
+
+    public function lastError(): string
+    {
+        return $this->lastError;
+    }
+
+    /**
+     * ★ 凭据是否完整：必须在调用登录/上传前检查。
+     *   凭据为空时 CEM 会返回登录页，后续所有判断都会失败，
+     *   但报错是"未查到流程卡号 / 未返回成功弹窗"这类无关信息，极难定位。
+     *   这里提前 fail-loudly，直接告诉运维是配置缺失。
+     */
+    public static function assertConfigured(): void
+    {
+        $u = self::cemUser();
+        $p = self::cemPass();
+        if ($u === '' || $p === '') {
+            $miss = array();
+            if ($u === '') $miss[] = 'CEM_USER';
+            if ($p === '') $miss[] = 'CEM_PASS';
+            throw new Exception(
+                'CEM 凭据未配置（缺 ' . implode('、', $miss) . '）。'
+                . '请在 backend/.env 或 backend/config/cem.local.php 中补充后重试。'
+            );
+        }
+    }
+
     // 真实路径
     const UPLOAD_URL   = '/Quality_Track/ExcelToQuality.aspx';
     const UV_QUERY_URL = '/Quality_Track/UV_Query.aspx';   // 任务管理 / 流程卡查询页面
@@ -51,6 +80,8 @@ class CemClient
 
     public function hasValidSession()
     {
+        // 凭据为空时不可能有有效会话，直接判否（否则会把登录页当成已登录）
+        if (self::cemUser() === '') return false;
         if (!file_exists(self::COOKIE_FILE)) return false;
         try {
             $html = $this->rawRequest(self::HOST . '/main.aspx', null, null, true);
@@ -94,8 +125,17 @@ class CemClient
 
                 @chmod(self::COOKIE_FILE, 0666);
                 @chmod(self::COOKIE_LOCK, 0666);
-                return $this->hasValidSession();
+
+                // ★ 原实现登录失败只 return false，异常被吞掉，
+                //   调用方继续请求业务页面 → 拿到登录页 → 报"未查到流程卡号"之类误导性错误。
+                //   这里记录真实原因，供上层给出明确提示。
+                $ok = $this->hasValidSession();
+                if (!$ok) {
+                    $this->lastError = '提交登录后会话校验仍未通过（账号或口令可能不正确，或 CEM 登录页字段已变更）';
+                }
+                return $ok;
             } catch (Exception $e) {
+                $this->lastError = '登录请求异常: ' . $e->getMessage();
                 if ($lock) {
                     @flock($lock, LOCK_UN);
                     @fclose($lock);
@@ -103,6 +143,7 @@ class CemClient
                 return false;
             }
         }
+        $this->lastError = '无法获取登录锁文件: ' . self::COOKIE_LOCK;
         return false;
     }
 
@@ -263,7 +304,9 @@ class CemClient
         if (!file_exists($localFilePath)) {
             throw new Exception('待上传的本地 Excel 文件不存在: ' . $localFilePath);
         }
-        $this->ensureLogin();
+        if (!$this->ensureLogin()) {
+            throw new Exception('CEM 登录失败，无法上传：' . ($this->lastError() ?: '未知原因'));
+        }
 
         $targetUrl = self::HOST . self::UPLOAD_URL;
 
