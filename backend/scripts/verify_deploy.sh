@@ -523,10 +523,22 @@ if printf '%s\n' "$AC_FINISH" | grep -q "closeWorkerRows"; then
 else
     echo "  [缺失]   finish() 未调用 closeWorkerRows → 多人协作时他人工时会漏结算"; fail=$((fail+1))
 fi
-if grep -q "ensurePresetRoles" "$B/app/Core/Schema.php" 2>/dev/null; then
-    echo "  [OK]     Schema 版本 5 含表结构自愈入口"; pass=$((pass+1))
+if [ -f "$BASE/tools/老化车多人维修补表.sql" ]; then
+    echo "  [OK]     手工兜底 SQL 存在：tools/老化车多人维修补表.sql"; pass=$((pass+1))
 else
-    echo "  [缺失]   Schema 自愈入口缺失"; fail=$((fail+1))
+    echo "  [警告]   缺少手工兜底 SQL：tools/老化车多人维修补表.sql（自动补表失效时用）"; warn=$((warn+1))
+fi
+# ★ 自愈闭环：初始化失败时必须撤销就绪标记，否则 ensureOnce 会认为"跑过了"
+#   而永久不再重试 —— 表就会一直缺失且页面无任何报错（2026-10-14 实测）。
+#   断言限定在 initTables() 方法体内：clearReady 出现在别处不算数。
+AC_INIT=$(awk '/private function initTables/,/^    }$/' "$B/app/Controllers/AgingCartController.php" 2>/dev/null)
+if printf '%s\n' "$AC_INIT" | grep -q "missingTables" \
+   && printf '%s\n' "$AC_INIT" | grep -q "clearReady" \
+   && grep -q "public static function clearReady" "$B/app/Core/Schema.php" 2>/dev/null \
+   && grep -q "aging_repair_workers" "$BASE/tools/老化车多人维修补表.sql" 2>/dev/null; then
+    echo "  [OK]     建表失败会撤销就绪标记并重试（不会永久缺表）"; pass=$((pass+1))
+else
+    echo "  [缺失]   缺少自愈闭环：initialized 失败后未 clearReady → 表可能永久缺失"; fail=$((fail+1))
 fi
 echo "  [提示]   模块登记需执行一次 SQL：tools/老化车模块初始化.sql（否则普通用户看不到菜单）"
 

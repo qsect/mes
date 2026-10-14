@@ -231,9 +231,45 @@ class AgingCartController
                 "`usage_type` VARCHAR(20) NOT NULL DEFAULT '流动使用' COMMENT '使用位置：固定使用/流动使用' AFTER `layers`");
 
             $this->initCarts($this->cartTotal());
+
+            // ★ 初始化是「静默」的（异常只进 error_log，不打断业务请求），
+            //   但静默不等于可以忽略失败：这里强制复核核心表是否真的存在。
+            //   缺表 → 撤销本次的就绪标记，下次请求继续重试，
+            //   避免出现「首次失败后被永久标记为已就绪，表再也不会创建」的僵局。
+            $missing = $this->missingTables();
+            if (!empty($missing)) {
+                Schema::clearReady(self::MODULE);
+                error_log('[AgingCart] 表初始化未完成，缺表：' . implode(', ', $missing)
+                    . '（常见原因：数据库账号无 CREATE 权限 / 磁盘只读；已撤销就绪标记，下次请求重试）');
+            }
         } catch (Throwable $e) {
             error_log('[AgingCart] 表结构初始化失败: ' . $e->getMessage());
+            Schema::clearReady(self::MODULE);
         }
+    }
+
+    /** 复核本模块的核心表是否真实存在（不看缓存、直接问 information_schema） */
+    private function missingTables(): array
+    {
+        $required = ['aging_carts', 'aging_repairs', 'aging_repair_workers', 'aging_settings'];
+        $missing = [];
+        try {
+            foreach ($required as $table) {
+                $st = $this->db->prepare(
+                    "SELECT COUNT(*) FROM information_schema.TABLES
+                     WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?"
+                );
+                $st->execute([$table]);
+                if ((int)$st->fetchColumn() === 0) {
+                    $missing[] = $table;
+                }
+            }
+        } catch (Throwable $e) {
+            // 查不到就当作全部未知，返回空让上层不再重复报警
+            error_log('[AgingCart] 表存在性校验失败: ' . $e->getMessage());
+            return [];
+        }
+        return $missing;
     }
 
     // ============================================================

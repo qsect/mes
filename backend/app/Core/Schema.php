@@ -80,6 +80,24 @@ class Schema
     }
 
     /**
+     * 清除就绪标记：下一次请求会重新执行该模块的初始化。
+     *
+     * ★ 为什么需要：initTables() 这类初始化通常把异常 try/catch 吞掉
+     *   （不想让 DDL 问题打断业务请求），但这会导致 ensureOnce 认为"执行过了"而写下就绪标记；
+     *   一旦首次执行因缺权限等原因失败，就永远不会重试 —— 表现为
+     *   「表永久缺失，而日志里只有一行，页面无任何报错」。
+     *   初始化失败时显式调用本方法，让下一次请求继续尝试自愈。
+     */
+    public static function clearReady(string $key): void
+    {
+        unset(self::$readyMemo[$key]);
+        $file = self::cacheFile($key);
+        if (is_file($file)) {
+            @unlink($file);
+        }
+    }
+
+    /**
      * 若该模块表结构尚未就绪，则执行 $fn（建表/补列），成功后写入标记。
      * 典型用法（控制器构造函数内）：
      *   \App\Core\Schema::ensureOnce('impedance', function () { $this->initTables(); });
