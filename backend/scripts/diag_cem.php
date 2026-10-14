@@ -17,6 +17,23 @@ declare(strict_types=1);
  * ★ 安全：只输出凭据的「是否配置」与长度，绝不打印明文。
  */
 
+// ---- 0. 注册 App\ 自动加载（与 public/index.php 的 PSR-4 完全一致）----
+// ★ 本项目没有 composer.json，App\ 命名空间由 index.php 里的 spl_autoload_register 提供。
+//   诊断脚本是独立 CLI 入口，不注册它就会在运行期报 Class "App\Core\Env" not found。
+if (!class_exists('App\\Core\\Env', false)) {
+    spl_autoload_register(function ($class) {
+        $prefix = 'App\\';
+        $baseDir = dirname(__DIR__) . '/app/';
+        $class = ltrim($class, '\\');
+        if (strncmp($prefix, $class, strlen($prefix)) === 0) {
+            $file = $baseDir . str_replace('\\', '/', substr($class, strlen($prefix))) . '.php';
+            if (file_exists($file)) {
+                require_once $file;
+            }
+        }
+    });
+}
+
 // ---- 1. 载入 .env（与 public/index.php 保持一致）----
 $envFile = dirname(__DIR__) . '/.env';
 if (is_file($envFile)) {
