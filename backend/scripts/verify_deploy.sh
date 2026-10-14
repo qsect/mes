@@ -532,10 +532,12 @@ fi
 #   而永久不再重试 —— 表就会一直缺失且页面无任何报错（2026-10-14 实测）。
 #   断言限定在 initTables() 方法体内：clearReady 出现在别处不算数。
 AC_INIT=$(awk '/private function initTables/,/^    }$/' "$B/app/Controllers/AgingCartController.php" 2>/dev/null)
+# ⚠️ 只判定「代码自愈」，不要把 SQL 文件是否存在也塞进来 ——
+#    2026-10-14 实测：代码全对，只因 tools/*.sql 没上传就被判 [缺失]，误导排查方向。
+#    SQL 文件是可选兜底，其存在性由上面的独立 [警告] 承担。
 if printf '%s\n' "$AC_INIT" | grep -q "missingTables" \
    && printf '%s\n' "$AC_INIT" | grep -q "clearReady" \
-   && grep -q "public static function clearReady" "$B/app/Core/Schema.php" 2>/dev/null \
-   && grep -q "aging_repair_workers" "$BASE/tools/老化车多人维修补表.sql" 2>/dev/null; then
+   && grep -q "public static function clearReady" "$B/app/Core/Schema.php" 2>/dev/null; then
     echo "  [OK]     建表失败会撤销就绪标记并重试（不会永久缺表）"; pass=$((pass+1))
 else
     echo "  [缺失]   缺少自愈闭环：initialized 失败后未 clearReady → 表可能永久缺失"; fail=$((fail+1))
