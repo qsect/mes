@@ -645,6 +645,17 @@
             投入工时合计：<b>{{ finishRow.work_text }}</b>
             <span class="ac-raw">（修复跨度 {{ finishRow.elapsed_text }}，重叠部分各计各的）</span>
           </div>
+
+          <!-- 收工会一并结束所有人的计时，这里显式列出受影响的人，避免误点 -->
+          <el-alert
+            v-if="activeWorkers(finishRow).length"
+            class="ac-finish-alert"
+            type="warning"
+            show-icon
+            :closable="false"
+            :title="`还有 ${activeWorkers(finishRow).length} 人正在维修`"
+            :description="`${activeWorkers(finishRow).map((w) => w.user_name).join('、')} 目前仍在计时，点「确认收工」会同时结束他们的维修计时，工单转为已修复。`"
+          />
         </div>
       </div>
       <el-form label-width="100px" size="small" style="margin-top:10px;">
@@ -1209,6 +1220,11 @@ async function joinRepair(row) {
   }
 }
 
+/** 仍在维修未结账的参与人：收工会把他们一并结掉，需显式提示 */
+function activeWorkers(row) {
+  return (row && Array.isArray(row.workers)) ? row.workers.filter((w) => w.working) : [];
+}
+
 /** 本人收工：只结束自己的计时，工单继续，其他人的计时不受影响 */
 async function leaveRepair(row) {
   try {
@@ -1702,6 +1718,10 @@ onBeforeUnmount(() => {
   margin-top: 6px;
   font-size: 12.5px;
   color: #606266;
+}
+
+.ac-finish-alert {
+  margin-top: 8px;
 }
 
 .mr-1 {
