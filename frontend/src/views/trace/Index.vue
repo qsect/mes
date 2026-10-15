@@ -409,13 +409,13 @@
       </template>
     </el-dialog>
 
-    <!-- 弹窗 2: 工单完工异步推送 CEM 对话框 -->
-    <el-dialog v-model="cemDialogVisible" title="工单扫码已完成" width="460px" :show-close="false" :close-on-click-modal="false">
+    <!-- 弹窗 2: CEM 推送结果对话框（扫码完成自动推送 / 手动一键推送 共用） -->
+    <el-dialog v-model="cemDialogVisible" title="CEM 推送结果" width="460px" :show-close="false" :close-on-click-modal="false">
       <div style="text-align:center; padding:10px 0;">
         <p style="font-size:15px; font-weight:bold; color:#1e293b; margin-bottom:8px;">
-          🎉 工单【{{ cemTargetWo }}】已完成全部条码扫码！
+          工单【{{ cemTargetWo }}】
         </p>
-        <p style="color:#64748b; font-size:13px; margin:0;">
+        <p style="color:#64748b; font-size:13px; margin:0; white-space:pre-wrap;">
           {{ cemStatusText }}
         </p>
       </div>
@@ -428,7 +428,7 @@
 
 <script setup>
 import { ref, computed, onMounted, nextTick } from 'vue';
-import { ElMessage, ElMessageBox } from 'element-plus';
+import { ElMessage, ElMessageBox, ElLoading } from 'element-plus';
 import request from '@/api/request';
 
 // 权限体系
@@ -566,7 +566,7 @@ const handleBarcodeScan = async () => {
       if (res.data.cur_point_completed) {
         const oldSn = currentBoxSn.value;
         if (res.data.task_all_completed) {
-          triggerTaskCompleted(currentTask.value.task_order);
+          pushCemOrder(currentTask.value.task_order);
         } else {
           resetBoxScanState(`【扫码点 ${selectedPoint.value}】上一台(${oldSn})已齐套，请扫描下一台（一级物料/装置SN）`);
           playBeepSuccess();
@@ -589,7 +589,7 @@ const cemTargetWo = ref('');
 const cemStatusText = ref('');
 const cemLoading = ref(false);
 
-const triggerTaskCompleted = (wo) => {
+const pushCemOrder = (wo) => {
   cemTargetWo.value = wo;
   cemStatusText.value = '正在将追溯明细同步至 CEM 中，请稍候...';
   cemLoading.value = true;
@@ -604,7 +604,7 @@ const triggerTaskCompleted = (wo) => {
   }).catch((e) => {
     // ★ 显示服务端返回的真实原因，而不是一句笼统的"未成功"
     const detail = (e && e.message) ? String(e.message) : '';
-    cemStatusText.value = '⚠️ 本地扫码已完成，但 CEM 上传未成功。'
+    cemStatusText.value = '⚠️ CEM 上传未成功。'
       + (detail ? `原因：${detail}。` : '')
       + '可在【追溯记录查询与导出】页随时补推。';
     cemLoading.value = false;
@@ -657,7 +657,9 @@ const handleSaveMatConfig = async () => {
     quantity: erpTask.value.quantity,
     batch_no: erpTask.value.batch_no || '',
     scan_points: cfgScanPoints.value,
-    children: selected
+    // ★ 回传 CEM 流程卡号 (tasksid) / 工程关联单据号 (rel_no)，供 CEM 推送填 H/I 列使用
+    tasksid: erpTask.value.tasksid || '',
+    rel_no: erpTask.value.rel_no || ''
   });
 
   ElMessage.success('追溯配置保存成功！已自动切换至扫码台');
@@ -734,15 +736,7 @@ const handleExportExcel = () => {
 const handleManualPushCem = async () => {
   const targetWo = querySearchKw.value.trim();
   if (!targetWo) return ElMessage.warning('请输入要推送的单号！');
-  const loading = ElLoading.service({ text: `正在推送工单【${targetWo}】至 CEM 平台，请耐心等待...`, background: 'rgba(0,0,0,0.7)' });
-  try {
-    const res = await request.post('/trace/manualPushCem', { task_order: targetWo }, { timeout: 120000 });
-    ElMessage.success(res.message || 'CEM 平台推送处理成功！');
-  } catch (err) {
-    ElMessage.error(err.message || '推送失败，请检查网络或单号');
-  } finally {
-    loading.close();
-  }
+  pushCemOrder(targetWo);
 };
 
 const handlePushFromConfig = async (row) => {
@@ -754,7 +748,7 @@ const handlePushFromConfig = async (row) => {
     ElMessage.success(res.message || '推送成功');
     row.cem_pushed = 1;
   } catch (err) {
-    ElMessage.error(err.message || '推送失败');
+    // 失败原因已由响应拦截器统一弹窗提示（与后端返回消息一致），此处不再重复弹
   } finally {
     loading.close();
   }

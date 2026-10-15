@@ -297,6 +297,115 @@ class CemClient
     }
 
     /**
+     * 根据流程卡号(26 开头 11 位)反查其「关联单据」(rel_no / 工程号)
+     *
+     * 背景：详情页 Quality_Tasks_Operation.aspx 的 <span id="Text_Relbillno">
+     *       是 JS 异步填充的，静态 HTML 里永远为空，curl 取不到；
+     *       而 UV_Query.aspx 的 GridView1 第 4 列「关联单据」是服务端渲染的，
+     *       与详情页看到的一致，是 rel_no 的权威来源。
+     *
+     * 策略：先扫首页 GridView1（目标卡号偶尔就在第 1 页），再提交 Txt_Find
+     *       按流程卡号搜索（UV_Query 的搜索框是「流程卡号 OR 关联单据」模糊匹配），
+     *       在结果行里找 流程卡号 == $cardNo 的那一行，取其 关联单据。
+     *
+     * @param string $cardNo 流程卡号（如 26101400016）
+     * @return string 关联单据（如 j2026703601），找不到返回 ''
+     */
+    public function queryRelNoByCardNo($cardNo)
+    {
+        $this->ensureLogin();
+        $cardNo = (string)$cardNo;
+        $targetUrl = self::HOST . self::UV_QUERY_URL;
+
+        // 1) 首页（目标偶尔已在第 1 页）
+        try {
+            $pageHtml = $this->rawRequest($targetUrl, null, self::HOST . '/main.aspx');
+        } catch (Exception $e) {
+            throw new Exception('无法打开 CEM 任务查询页面: ' . $e->getMessage());
+        }
+        $rel = $this->parseRelNoFromGrid($pageHtml, $cardNo);
+        if ($rel !== '') return $rel;
+
+        // 2) 按流程卡号搜索
+        $baseFields = $this->extractAllHiddenFields($pageHtml);
+        $postData = array_merge($baseFields, array(
+            '__EVENTTARGET'   => '',
+            '__EVENTARGUMENT' => '',
+            'Txt_Find'        => $cardNo,
+            'imgbtn.x'        => '10',
+            'imgbtn.y'        => '10',
+            'hidSQL'          => '',
+        ));
+
+        try {
+            $resultHtml = $this->rawRequest($targetUrl, $postData, $targetUrl);
+        } catch (Exception $e) {
+            throw new Exception('查询 CEM 关联单据失败: ' . $e->getMessage());
+        }
+
+        if (strpos($resultHtml, 'userLogin') !== false && strpos($resultHtml, 'userPwd') !== false) {
+            @unlink(self::COOKIE_FILE);
+            if ($this->login()) {
+                return $this->queryRelNoByCardNo($cardNo);
+            }
+        }
+
+        $rel = $this->parseRelNoFromGrid($resultHtml, $cardNo);
+        if (($debugFile = @tempnam(sys_get_temp_dir(), 'cem_rel_')) !== false) {
+            @file_put_contents($debugFile, $resultHtml);
+        }
+        return $rel;
+    }
+
+    /**
+     * 从 GridView1 里找 流程卡号 == $cardNo 的行，返回其「关联单据」列
+     */
+    private function parseRelNoFromGrid($html, $cardNo)
+    {
+        if (empty($html)) return '';
+        $cardNo = (string)$cardNo;
+
+        $tableHtml = $html;
+        if (preg_match('/<table[^>]*id=["\']GridView1["\'][^>]*>(.*?)<\/table>/is', $html, $tm)) {
+            $tableHtml = $tm[0];
+        }
+
+        $cardIdx = 0;   // 「流程卡号」默认第 0 列
+        $relIdx  = 4;   // 「关联单据」默认第 4 列
+
+        if (preg_match('/<tr[^>]*>(.*?)<\/tr>/is', $tableHtml, $headerTr)
+            && preg_match_all('/<th[^>]*>(.*?)<\/th>/is', $headerTr[1], $thList)
+        ) {
+            foreach ($thList[1] as $i => $thHtml) {
+                $headText = trim(preg_replace('/\s+/', '', strip_tags($thHtml)));
+                if ($headText === '流程卡号') $cardIdx = $i;
+                if ($headText === '关联单据') $relIdx  = $i;
+            }
+        }
+
+        if (preg_match_all('/<tr[^>]*>(.*?)<\/tr>/is', $tableHtml, $trList)) {
+            foreach ($trList[1] as $tr) {
+                if (stripos($tr, '<th') !== false) continue;
+                if (strpos($tr, 'GridView1_lktransid') === false) continue;
+                if (!preg_match_all('/<td[^>]*>(.*?)<\/td>/is', $tr, $tdList)) continue;
+
+                $cleanTds = array();
+                foreach ($tdList[1] as $tdHtml) {
+                    $cleanTds[] = trim(preg_replace('/\s+/', ' ', strip_tags($tdHtml)));
+                }
+                if (!isset($cleanTds[$cardIdx]) || !isset($cleanTds[$relIdx])) continue;
+
+                $card = trim($cleanTds[$cardIdx]);
+                $rel  = trim($cleanTds[$relIdx]);
+                if ($card === $cardNo) {
+                    return $rel;
+                }
+            }
+        }
+        return '';
+    }
+
+    /**
      * 纯 PHP 原生 cURL 模拟选择文件并点击"导入数据"
      */
     public function uploadQualityExcel($localFilePath, $uploadName = null)

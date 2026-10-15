@@ -514,7 +514,19 @@ if ($action === 'check_or_fetch_erp') {
 
         $relNo = '';
         $labName = '';
-        if (preg_match('/id=["\']Text_Relbillno["\'][^>]*>([^<]+)<\//i', $rawHtml, $m)) $relNo = trim($m[1]);
+        // ★ rel_no 取自已服务渲染的 UV_Query 列表页第 4 列「关联单据」；
+        //   详情页 Text_Relbillno 是 JS 异步填充，静态 HTML 永远为空（2026-10-14 踩雷）。
+        if (class_exists('CemClient', false) === false) {
+            require_once __DIR__ . '/../includes/CemClient.php';
+        }
+        try {
+            $cem = new CemClient();
+            if ($cem->ensureLogin()) {
+                $relNo = $cem->queryRelNoByCardNo($tasksid);
+            }
+        } catch (Throwable $e) {
+            $relNo = '';
+        }
         if (preg_match('/id=["\']Labname["\'][^>]*>([^<]+)<\//i', $rawHtml, $m)) $labName = trim($m[1]);
 
         $detailBarcode = fetchExistingBarcode($tasksid, $rawHtml);
@@ -815,6 +827,8 @@ if ($action === 'save_config') {
     $batchNo    = trim((string)($in['batch_no'] ?? ''));
     $scanPoints = intval($in['scan_points'] ?? 1);
     $children   = $in['children'] ?? array();
+    $tasksid    = trim((string)($in['tasksid'] ?? ''));   // CEM流程卡号（来自check_or_fetch_erp）
+    $relNo      = trim((string)($in['rel_no'] ?? ''));     // CEM工程关联单据号（来自check_or_fetch_erp）
     if (is_string($children)) $children = json_decode($children, true) ?: array();
 
     if ($taskOrder === '' || $parentCode === '') sendJson(false, '参数不完整，请重新查询工单后再保存！');
@@ -841,15 +855,15 @@ if ($action === 'save_config') {
         $batchPrefix = ($batchNo !== '') ? substr($batchNo, 0, 16) : '';
 
         if ($existId) {
-            // 注意：order_type / tasksid / rel_no 由 check_or_fetch_erp 阶段写入，此处不覆盖
-            $db->prepare("UPDATE `trace_tasks` SET `parent_code` = ?, `description` = ?, `quantity` = ?, `batch_prefix` = ?, `batch_no` = ?, `scan_points` = ? WHERE `task_order` = ?")
-               ->execute(array($parentCode, $parentName, $quantity, $batchPrefix, $batchNo, $scanPoints, $taskOrder));
+            // ★ 修复：pushTask 的 H/I 列依赖 tasksid / rel_no，save_config 必须写回这两列
+            $db->prepare("UPDATE `trace_tasks` SET `parent_code` = ?, `description` = ?, `quantity` = ?, `batch_prefix` = ?, `batch_no` = ?, `scan_points` = ?, `order_type` = ?, `tasksid` = ?, `rel_no` = ? WHERE `task_order` = ?")
+               ->execute(array($parentCode, $parentName, $quantity, $batchPrefix, $batchNo, $scanPoints, (stripos($taskOrder, 'XQ') === 0 ? 'xq_project' : 'standard'), $tasksid, $relNo, $taskOrder));
         } else {
-            $db->prepare("INSERT INTO `trace_tasks` (`task_order`, `parent_code`, `description`, `quantity`, `batch_prefix`, `batch_no`, `scan_points`, `order_type`, `created_by`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            $db->prepare("INSERT INTO `trace_tasks` (`task_order`, `parent_code`, `description`, `quantity`, `batch_prefix`, `batch_no`, `scan_points`, `order_type`, `tasksid`, `rel_no`, `created_by`) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                ->execute(array(
                    $taskOrder, $parentCode, $parentName, $quantity, $batchPrefix, $batchNo, $scanPoints,
                    (stripos($taskOrder, 'XQ') === 0 ? 'xq_project' : 'standard'),
-                   intval($user['id'])
+                   $tasksid, $relNo, intval($user['id'])
                ));
         }
 
@@ -1179,6 +1193,15 @@ if ($action === 'export_excel') {
         sendJson(false, '您没有导出追溯记录的权限！');
     }
 
+    // ★ 2026-10-14 与老系统导出一致：9 列
+    //   装置条码/装置物料编码/箱柜条码/箱柜编码/扫码人员ID/扫码时间/设备号/任务号/工程号
+    //   任务号/工程号口径与 CemPushService::pushTask 完全相同：
+    //     XQ 单   → 任务号 = CEM流程卡号(tasksid)，工程号 = rel_no
+    //     数字工单 → 任务号 = CEM流程卡号（实时查询），工程号 = 工单号本身
+    $vendorAutoload = __DIR__ . '/../vendor/autoload.php';
+    if (is_file($vendorAutoload)) require_once $vendorAutoload;
+    if (!class_exists('CemClient')) require_once __DIR__ . '/../includes/CemClient.php';
+
     try {
         $search = trim((string)($in['search'] ?? ''));
         $where  = array('1=1');
@@ -1190,15 +1213,12 @@ if ($action === 'export_excel') {
         $whereSql = implode(' AND ', $where);
 
         $sql = "SELECT b.task_order, b.box_sn, b.parent_code, s.scan_point, s.child_code, s.child_sn, s.scanned_at,
-                       COALESCE(NULLIF(u.full_name, ''), u.username, s.scanned_by) AS scanner_name
+                       u.id AS scanner_id, COALESCE(u.badge_no, u.username, u.id) AS scanner_emp_no,
+                       t.order_type, t.tasksid, t.rel_no
                 FROM `trace_boxes` b
                 INNER JOIN `trace_scans` s ON b.id = s.box_id
-                LEFT JOIN `users` u ON (
-                    CAST(u.badge_no AS CHAR) = CAST(s.scanned_by AS CHAR)
-                    OR TRIM(LEADING '0' FROM CAST(u.badge_no AS CHAR)) = TRIM(LEADING '0' FROM CAST(s.scanned_by AS CHAR))
-                    OR u.full_name = s.scanned_by
-                    OR u.username = s.scanned_by
-                )
+                LEFT JOIN `users` u ON s.scanned_by = u.id
+                LEFT JOIN `trace_tasks` t ON b.task_order = t.task_order
                 WHERE {$whereSql}
                 ORDER BY s.id DESC";
 
@@ -1206,7 +1226,46 @@ if ($action === 'export_excel') {
         $stmt->execute($params);
         $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        $headers = array('二级物料条码(SN)', '二级物料代码', '一级条码/装置号', '产品编码', '扫码工位', '扫码人员', '扫码时间', '工单/单据号');
+        // 任务号/工程号逐行推导（数字工单需查 CEM，按工单号缓存）
+        $client      = new CemClient();
+        $cachedCards = array();
+        $exportRows  = array();
+        foreach ($rows as $r) {
+            $taskOrder = trim((string)($r['task_order'] ?? ''));
+            $orderType = trim((string)($r['order_type'] ?? ''));
+            $isXq = ($orderType === 'xq_project' || stripos($taskOrder, 'XQ') === 0);
+
+            if ($isXq) {
+                $finalTaskNo    = !empty($r['tasksid']) ? $r['tasksid'] : $taskOrder;
+                $finalProjectNo = !empty($r['rel_no']) ? $r['rel_no'] : '';
+            } else {
+                if ($taskOrder !== '' && !isset($cachedCards[$taskOrder])) {
+                    try {
+                        $cachedCards[$taskOrder] = $client->queryProjectCardNo($taskOrder);
+                    } catch (Throwable $e) {
+                        $cachedCards[$taskOrder] = '';
+                    }
+                }
+                $finalTaskNo    = (string)($cachedCards[$taskOrder] ?? '');
+                $finalProjectNo = $taskOrder;
+            }
+
+            $scannerId = !empty($r['scanner_emp_no']) ? $r['scanner_emp_no'] : ($r['scanner_id'] ?: '20280');
+
+            $exportRows[] = array(
+                (string)($r['child_sn'] ?? ''),
+                substr((string)($r['child_code'] ?? ''), 0, 10),
+                (string)($r['box_sn'] ?? ''),
+                substr((string)($r['parent_code'] ?? ''), 0, 10),
+                (string)$scannerId,
+                (string)($r['scanned_at'] ?? ''),
+                'CK3R084X1400604',
+                (string)$finalTaskNo,
+                (string)$finalProjectNo,
+            );
+        }
+
+        $headers = array('装置条码', '装置物料编码', '箱柜条码', '箱柜编码', '扫码人员ID', '扫码时间', '设备号', '任务号', '工程号');
 
         if (class_exists('PhpOffice\\PhpSpreadsheet\\Spreadsheet')) {
             $spreadsheet = new \PhpOffice\PhpSpreadsheet\Spreadsheet();
@@ -1215,25 +1274,20 @@ if ($action === 'export_excel') {
             $sheet->fromArray($headers, null, 'A1');
 
             $line = 2;
-            foreach ($rows as $r) {
-                $sheet->setCellValueExplicit('A' . $line, (string)$r['child_sn'], \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING);
-                $sheet->setCellValueExplicit('B' . $line, substr((string)$r['child_code'], 0, 10), \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING);
-                $sheet->setCellValueExplicit('C' . $line, (string)$r['box_sn'], \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING);
-                $sheet->setCellValueExplicit('D' . $line, substr((string)$r['parent_code'], 0, 10), \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING);
-                $sheet->setCellValueExplicit('E' . $line, '点 ' . intval($r['scan_point']), \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING);
-                $sheet->setCellValueExplicit('F' . $line, (string)$r['scanner_name'], \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING);
-                $sheet->setCellValueExplicit('G' . $line, (string)$r['scanned_at'], \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING);
-                $sheet->setCellValueExplicit('H' . $line, (string)$r['task_order'], \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING);
+            foreach ($exportRows as $vals) {
+                foreach ($vals as $ci => $v) {
+                    $sheet->setCellValueExplicit(chr(ord('A') + $ci) . $line, (string)$v, \PhpOffice\PhpSpreadsheet\Cell\DataType::TYPE_STRING);
+                }
                 $line++;
             }
 
-            $sheet->getStyle('A1:H1')->getFont()->setBold(true)->getColor()->setRGB('FFFFFF');
-            $sheet->getStyle('A1:H1')->getFill()->setFillType(\PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID)->getStartColor()->setRGB('2F5597');
-            foreach (range('A', 'H') as $col) {
+            $sheet->getStyle('A1:I1')->getFont()->setBold(true)->getColor()->setRGB('FFFFFF');
+            $sheet->getStyle('A1:I1')->getFill()->setFillType(\PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID)->getStartColor()->setRGB('2F5597');
+            foreach (range('A', 'I') as $col) {
                 $sheet->getColumnDimension($col)->setAutoSize(true);
             }
 
-            $filename = '质量追溯明细_' . date('Ymd_His') . '.xlsx';
+            $filename = 'MES_Quality_' . ($search !== '' ? preg_replace('/[^\w\-]/', '_', $search) : date('Ymd_His')) . '.xlsx';
             header('Content-Type: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
             header('Content-Disposition: attachment; filename="' . rawurlencode($filename) . '"');
             header('Cache-Control: max-age=0');
@@ -1241,8 +1295,8 @@ if ($action === 'export_excel') {
             exit;
         }
 
-        // ---- CSV 兜底（未安装 PhpSpreadsheet 时）----
-        $filename = '质量追溯明细_' . date('Ymd_His') . '.csv';
+        // ---- CSV 兜底（未安装 PhpSpreadsheet 时，同为 9 列）----
+        $filename = 'MES_Quality_' . ($search !== '' ? preg_replace('/[^\w\-]/', '_', $search) : date('Ymd_His')) . '.csv';
         header('Content-Type: text/csv; charset=utf-8');
         header('Content-Disposition: attachment; filename="' . rawurlencode($filename) . '"');
 
@@ -1250,17 +1304,16 @@ if ($action === 'export_excel') {
         fwrite($output, chr(0xEF) . chr(0xBB) . chr(0xBF));
 
         fputcsv($output, array_map('excelSafe', $headers));
-        foreach ($rows as $r) {
-            fputcsv($output, array_map('excelSafe', array(
-                "\t" . $r['child_sn'],
-                "\t" . substr((string)$r['child_code'], 0, 10),
-                "\t" . $r['box_sn'],
-                "\t" . substr((string)$r['parent_code'], 0, 10),
-                '点 ' . intval($r['scan_point']),
-                $r['scanner_name'],
-                $r['scanned_at'],
-                "\t" . $r['task_order']
-            )));
+        foreach ($exportRows as $vals) {
+            // 条码/编号列加 \t 前缀，防止 Excel 按科学计数法吞位
+            $vals[0] = "\t" . $vals[0];
+            $vals[1] = "\t" . $vals[1];
+            $vals[2] = "\t" . $vals[2];
+            $vals[3] = "\t" . $vals[3];
+            $vals[4] = "\t" . $vals[4];
+            $vals[7] = "\t" . $vals[7];
+            $vals[8] = "\t" . $vals[8];
+            fputcsv($output, array_map('excelSafe', $vals));
         }
 
         fclose($output);

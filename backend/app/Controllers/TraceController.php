@@ -185,6 +185,7 @@ class TraceController
                         OR TRIM(LEADING '0' FROM CAST(u.badge_no AS CHAR)) = TRIM(LEADING '0' FROM CAST(s.scanned_by AS CHAR))
                         OR u.full_name = s.scanned_by
                         OR u.username = s.scanned_by
+                        OR u.id = CAST(s.scanned_by AS UNSIGNED)
                     )
                     WHERE {$whereSql}
                     ORDER BY s.id DESC

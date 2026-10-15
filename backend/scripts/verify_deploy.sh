@@ -605,6 +605,56 @@ else
 fi
 
 echo ""
+echo "── 二十一、追溯导出/CEM 数据口径（9 列一致 + tasksid 落库）──"
+# ★ 2026-10-14：CEM 推送"成功但不显示"的根因是 H/I 列（任务号/工程号）取不到值。
+#   check_or_fetch_erp 查出的 tasksid/rel_no 从未落库 → pushTask 回退成 XQ 工单号。
+#   同时 web 端导出曾是 8 列旧格式，与老系统 9 列不一致。此处固化三条正向断言。
+SAVE_CFG=$(grep -A60 "action === 'save_config'" "$B/app/legacy_trace.php")
+if echo "$SAVE_CFG" | grep -q '`tasksid` = ?' \
+   && echo "$SAVE_CFG" | grep -q '`order_type`, `tasksid`, `rel_no`, `created_by`'; then
+    echo "  [OK]     save_config 已把 tasksid/rel_no 写回 trace_tasks（UPDATE+INSERT 双路径）"; pass=$((pass+1))
+else
+    echo "  [缺失]   save_config 未落库 tasksid/rel_no → CEM 推送 H/I 列将回退为工单号，CEM 界面不显示"; fail=$((fail+1))
+fi
+EXP_BLK=$(grep -A140 "action === 'export_excel'" "$B/app/legacy_trace.php")
+if echo "$EXP_BLK" | grep -q "'装置条码', '装置物料编码', '箱柜条码', '箱柜编码', '扫码人员ID', '扫码时间', '设备号', '任务号', '工程号'"; then
+    echo "  [OK]     追溯导出为 9 列标准格式（与老系统/CEM 导入模板一致）"; pass=$((pass+1))
+else
+    echo "  [缺失]   追溯导出表头不是 9 列标准格式 → 与老系统导出不一致"; fail=$((fail+1))
+fi
+# ★ 断言铁律：含 [ ] ( ) $ 的模式必须用 grep -F，否则方括号被当字符类、恒假误报 [缺失]
+if echo "$EXP_BLK" | grep -qF "empty(\$r['tasksid']) ? \$r['tasksid']" \
+   && echo "$EXP_BLK" | grep -qF "empty(\$r['rel_no']) ? \$r['rel_no']"; then
+    echo "  [OK]     导出 H/I 列口径与 CemPushService 推送一致（tasksid/rel_no）"; pass=$((pass+1))
+else
+    echo "  [缺失]   导出 H/I 列未按 tasksid/rel_no 推导 → 导出的任务号不是 CEM 流程卡号"; fail=$((fail+1))
+fi
+# 前端回传：服务器上通常只有 dist 产物（源码未必上传），源码在则查源码，否则查产物
+TRACE_VUE="$F/src/views/trace/Index.vue"
+if [ -f "$TRACE_VUE" ]; then
+    if grep -q "tasksid: erpTask.value.tasksid" "$TRACE_VUE" 2>/dev/null; then
+        echo "  [OK]     前端 saveConfig 已回传 tasksid/rel_no"; pass=$((pass+1))
+    else
+        echo "  [缺失]   前端源码未回传 tasksid/rel_no → 新工单仍需手工补 SQL 才能推 CEM"; fail=$((fail+1))
+    fi
+elif [ -d "$BASE/frontend/dist/assets" ]; then
+    # 属性名经 esbuild 压缩后仍保留：含 /trace/saveConfig 的 chunk 应同时含 tasksid: 与 rel_no:
+    TRACE_CHUNK=$(grep -rl "/trace/saveConfig" "$BASE/frontend/dist/assets" 2>/dev/null | head -1)
+    if [ -n "$TRACE_CHUNK" ] && grep -q "tasksid:" "$TRACE_CHUNK" && grep -q "rel_no:" "$TRACE_CHUNK"; then
+        echo "  [OK]     dist 产物含 tasksid/rel_no 回传（源码未上传，按产物判定）"; pass=$((pass+1))
+    else
+        echo "  [未重建] 前端无源码且 dist 未见回传 → 请上传 Index.vue 或 rm -rf dist/assets && npm run build"; fail=$((fail+1))
+    fi
+else
+    echo "  [跳过]   前端源码与 dist 均不在本机（纯后端部署时可忽略）"
+fi
+if [ -f "$B/scripts/backfill_tasksid.php" ]; then
+    echo "  [OK]     补数脚本存在：backend/scripts/backfill_tasksid.php"; pass=$((pass+1))
+else
+    echo "  [警告]   缺少补数脚本 backend/scripts/backfill_tasksid.php（历史工单补 tasksid 用）"; warn=$((warn+1))
+fi
+
+echo ""
 echo "=================================================="
 echo " 通过 $pass 项 / 失败 $fail 项"
 if [ "$warn" -gt 0 ]; then
