@@ -657,6 +657,14 @@ const handleSaveMatConfig = async () => {
     quantity: erpTask.value.quantity,
     batch_no: erpTask.value.batch_no || '',
     scan_points: cfgScanPoints.value,
+    // ★ 必须把勾选的二级物料明细一并回传，否则后端校验「请至少勾选一项追溯物料」恒失败
+    children: selected.map(m => ({
+      code: m.code,
+      name: m.name,
+      unit_quantity: m.unit_quantity,
+      scan_point: m.scan_point,
+      send_quantity: m.send_quantity
+    })),
     // ★ 回传 CEM 流程卡号 (tasksid) / 工程关联单据号 (rel_no)，供 CEM 推送填 H/I 列使用
     tasksid: erpTask.value.tasksid || '',
     rel_no: erpTask.value.rel_no || ''
